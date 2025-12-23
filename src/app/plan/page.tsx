@@ -41,6 +41,64 @@ export default function PlanPage() {
     const [loadingWeather, setLoadingWeather] = useState(false);
     const [calculationResult, setCalculationResult] = useState<any>(null); // Store API response
 
+    // Stream State
+    const [vehicleTemp, setVehicleTemp] = useState<number | null>(null);
+    const [tirePressure, setTirePressure] = useState<number>(35); // Default 35 PSI
+    const [soh, setSoh] = useState<number | null>(null);
+    const [isStreamConnected, setIsStreamConnected] = useState(false);
+
+    // Stream Integration
+    React.useEffect(() => {
+        let eventSource: EventSource | null = null;
+
+        // 1. Initial Trigger to run the simulator automatically
+        fetch('/api/simulate').catch(err => console.error("Auto-simulation trigger failed", err));
+
+        try {
+            eventSource = new EventSource('/api/calculate/stream');
+
+            eventSource.onopen = () => {
+                setIsStreamConnected(true);
+                // console.log("Stream Connected");
+            };
+
+            eventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    // Support both keys just in case
+                    const tempVal = data.vehicle_temp !== undefined ? data.vehicle_temp : data.temp;
+                    if (tempVal !== undefined) setVehicleTemp(Number(tempVal));
+
+                    // Current Charge -> State of Charge
+                    if (data.currentCharge !== undefined) setBattery(Number(data.currentCharge));
+                    if (data.soc !== undefined) setBattery(Number(data.soc)); // Support explicit soc key
+
+                    // Tire Pressure
+                    if (data.tire_pressure !== undefined) setTirePressure(Number(data.tire_pressure));
+
+                    // SOH (State of Health)
+                    if (data.soh !== undefined) setSoh(Number(data.soh));
+                } catch (e) {
+                    console.error("Error parsing stream data", e);
+                }
+            };
+
+            eventSource.onerror = (err) => {
+                console.error("Stream Error:", err);
+                setIsStreamConnected(false);
+                eventSource?.close();
+            };
+
+        } catch (error) {
+            console.error("Failed to connect to stream:", error);
+        }
+
+        return () => {
+            if (eventSource) {
+                eventSource.close();
+            }
+        };
+    }, []);
 
     const handleCitySearch = async (query: string, type: 'start' | 'destination') => {
         if (type === 'start') setIsSearchingStart(true);
@@ -83,7 +141,9 @@ export default function PlanPage() {
                     passengers: passengers,
                     avgConsumption: consumptionKwh100km,
                     initialBatteryPct: battery,
-                    batteryCapacity: batteryCapacity
+                    batteryCapacity: batteryCapacity,
+                    tirePressure: tirePressure, // Pass tire pressure if API supports it
+                    vehicleTemp: vehicleTemp // Pass vehicle temp if API supports it
                 })
             });
 
@@ -221,6 +281,27 @@ export default function PlanPage() {
                                 />
                             </div>
 
+                            {/* Efficiency (Moved out of EV Specs) */}
+                            <div className="space-y-2 pt-4 border-t border-zinc-800/50">
+                                <div className="flex justify-between items-center">
+                                    <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
+                                        <Wifi className="w-4 h-4 text-purple-500" /> Efficiency
+                                    </label>
+                                    <span className="text-xs font-mono font-bold text-purple-400">
+                                        {energyConsumption} kWh/km
+                                    </span>
+                                </div>
+                                <input
+                                    type="number"
+                                    min="0.1"
+                                    max="1.0"
+                                    step="0.01"
+                                    value={energyConsumption}
+                                    onChange={(e) => setEnergyConsumption(parseFloat(e.target.value))}
+                                    className="flex h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+                                />
+                            </div>
+
                             {/* EV Configuration */}
                             <div className="space-y-4 pt-4 border-t border-zinc-800/50">
                                 <h4 className="text-xs font-mono text-zinc-500 uppercase tracking-wider">EV Specs</h4>
@@ -231,9 +312,11 @@ export default function PlanPage() {
                                         <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
                                             <Activity className="w-4 h-4 text-blue-500" /> Battery Capacity
                                         </label>
-                                        <span className="text-xs font-mono font-bold text-blue-400">
-                                            {batteryCapacity} kWh
-                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs font-mono font-bold text-blue-400">
+                                                {batteryCapacity} kWh
+                                            </span>
+                                        </div>
                                     </div>
                                     <input
                                         type="number"
@@ -245,24 +328,73 @@ export default function PlanPage() {
                                     />
                                 </div>
 
-                                {/* Energy Consumption */}
+                                {/* SoH (State of Health) - NOW PROMINENT */}
                                 <div className="space-y-2">
                                     <div className="flex justify-between items-center">
                                         <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
-                                            <Wifi className="w-4 h-4 text-purple-500" /> Efficiency
+                                            <Activity className="w-4 h-4 text-pink-500" /> State of Health
                                         </label>
-                                        <span className="text-xs font-mono font-bold text-purple-400">
-                                            {energyConsumption} kWh/km
+                                        {soh !== null ? (
+                                            <span className="text-xs font-mono font-bold text-pink-400 animate-pulse">
+                                                {soh}%
+                                            </span>
+                                        ) : (
+                                            <span className="text-xs font-mono text-zinc-600">
+                                                -- (Waiting for Stream)
+                                            </span>
+                                        )}
+                                    </div>
+                                    <input
+                                        type="number"
+                                        readOnly
+                                        value={soh || ''}
+                                        className="flex h-10 w-full rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-400 cursor-not-allowed focus:outline-none"
+                                        placeholder="Waiting for telemetry..."
+                                    />
+                                </div>
+
+                                {/* Vehicle Temp (Streamed) */}
+                                <div className="space-y-2">
+                                    <div className="flex justify-between items-center">
+                                        <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
+                                            <Activity className="w-4 h-4 text-orange-500" /> Vehicle Temp
+                                        </label>
+                                        {vehicleTemp !== null ? (
+                                            <span className="text-xs font-mono font-bold text-orange-400 animate-pulse">
+                                                {vehicleTemp}°C
+                                            </span>
+                                        ) : (
+                                            <span className="text-xs font-mono text-zinc-600">
+                                                -- (Waiting for Stream)
+                                            </span>
+                                        )}
+                                    </div>
+                                    {/* Read-only display bar or visual element */}
+                                    <div className="w-full bg-zinc-800 h-1 rounded-full overflow-hidden">
+                                        <div
+                                            className="h-full bg-orange-500 transition-all duration-500"
+                                            style={{ width: `${Math.min(Math.max(((vehicleTemp || 0) + 20) / 80 * 100, 0), 100)}%` }} // Arbitrary scale -20 to 60C
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Tire Pressure */}
+                                <div className="space-y-2">
+                                    <div className="flex justify-between items-center">
+                                        <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
+                                            <Activity className="w-4 h-4 text-yellow-500" /> Tire Pressure
+                                        </label>
+                                        <span className="text-xs font-mono font-bold text-yellow-400">
+                                            {tirePressure} PSI
                                         </span>
                                     </div>
                                     <input
                                         type="number"
-                                        min="0.1"
-                                        max="1.0"
-                                        step="0.01"
-                                        value={energyConsumption}
-                                        onChange={(e) => setEnergyConsumption(parseFloat(e.target.value))}
-                                        className="flex h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+                                        min="20"
+                                        max="50"
+                                        value={tirePressure}
+                                        onChange={(e) => setTirePressure(parseInt(e.target.value))}
+                                        className="flex h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent transition-all"
                                     />
                                 </div>
                             </div>
@@ -366,12 +498,14 @@ export default function PlanPage() {
                 )}
 
                 <div className="flex items-center justify-between py-2 border-t border-zinc-900/50">
-                    <span className="inline-flex items-center rounded-full border text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-emerald-900/50 text-emerald-500 bg-emerald-950/10 gap-2 px-3 py-1">
+                    <span className={`inline-flex items-center rounded-full border text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-emerald-900/50 ${isStreamConnected ? 'text-emerald-500 bg-emerald-950/10' : 'text-zinc-500 bg-zinc-900'} gap-2 px-3 py-1`}>
                         <span className="relative flex h-2 w-2">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                            {isStreamConnected && (
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                            )}
+                            <span className={`relative inline-flex rounded-full h-2 w-2 ${isStreamConnected ? 'bg-emerald-500' : 'bg-zinc-600'}`}></span>
                         </span>
-                        Confluent Stream: ONLINE
+                        Confluent Stream: {isStreamConnected ? 'ONLINE' : 'CONNECTING...'}
                     </span>
                     <span className="inline-flex items-center rounded-full border text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-blue-900/50 text-blue-500 bg-blue-950/10 gap-2 px-3 py-1">
                         <Activity className="w-3 h-3 mr-1" />
@@ -404,6 +538,14 @@ export default function PlanPage() {
                                 <span className="text-zinc-500">Duration</span>
                                 <span className="text-zinc-200 font-mono">
                                     {calculationResult ? `${calculationResult.duration_mins} min` : '--'}
+                                </span>
+                            </div>
+
+                            {/* NEW: Live Stream Data in Map Panel too */}
+                            <div className="flex justify-between items-center text-sm pt-2 border-t border-zinc-800/50 mt-2">
+                                <span className="text-zinc-500">Live Temp</span>
+                                <span className="text-zinc-200 font-mono">
+                                    {vehicleTemp ? `${vehicleTemp}°C` : '--'}
                                 </span>
                             </div>
                         </div>
