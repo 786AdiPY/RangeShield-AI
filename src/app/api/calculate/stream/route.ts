@@ -22,7 +22,7 @@ export async function GET(request: Request) {
 
             try {
                 await consumer.connect();
-                await consumer.subscribe({ topic: 'vehicle_telementry', fromBeginning: false });
+                await consumer.subscribe({ topic: 'vehicle_telementry', fromBeginning: true });
 
                 // 2. Run the Consumer
                 await consumer.run({
@@ -39,8 +39,16 @@ export async function GET(request: Request) {
                 // 4. Handle Client Disconnect (Cleanup)
                 request.signal.addEventListener('abort', async () => {
                     console.log('User closed tab. Disconnecting Kafka...');
-                    await consumer.disconnect();
-                    controller.close();
+                    try {
+                        await consumer.disconnect();
+                    } catch (e) {
+                        console.error("Error disconnecting Kafka:", e);
+                    }
+                    try {
+                        controller.close();
+                    } catch (e) {
+                        // Ignore if already closed
+                    }
                 });
 
             } catch (err) {

@@ -3,13 +3,24 @@ const { Kafka } = require('kafkajs');
 
 const kafka = new Kafka({
     clientId: 'hackathon-car',
-    brokers: ['pkc-xrnwx.asia-south2.gcp.confluent.cloud:9092'], // ⚠️ REPLACE THIS
-    ssl: true,
+    brokers: ['pkc-xrnwx.asia-south2.gcp.confluent.cloud:9092'],
+    ssl: {
+        rejectUnauthorized: false
+    }, // Confluent Cloud requires valid SSL
     sasl: {
         mechanism: 'plain',
         username: process.env.CONFLUENT_API_KEY,
         password: process.env.CONFLUENT_API_SECRET,
     },
+    // Reliability settings
+    connectionTimeout: 10000, // Lower initial timeout to fail fast if network is down, but retry handles wait
+    authenticationTimeout: 10000,
+    retry: {
+        initialRetryTime: 1000,
+        retries: 5,
+        factor: 0.2, // Linear-ish backoff to retry quickly
+        multiplier: 2
+    }
 });
 
 const producer = kafka.producer();
@@ -44,6 +55,7 @@ const run = async () => {
     } finally {
         await producer.disconnect();
         console.log("🔌 Disconnected");
+        process.exit(0); // Force exit to prevent hanging handles
     }
 };
 

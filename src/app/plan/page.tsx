@@ -51,15 +51,21 @@ export default function PlanPage() {
     React.useEffect(() => {
         let eventSource: EventSource | null = null;
 
-        // 1. Initial Trigger to run the simulator automatically
-        fetch('/api/simulate').catch(err => console.error("Auto-simulation trigger failed", err));
-
         try {
             eventSource = new EventSource('/api/calculate/stream');
 
             eventSource.onopen = () => {
                 setIsStreamConnected(true);
                 // console.log("Stream Connected");
+
+                // Trigger simulation on page load (via API)
+                setTimeout(() => {
+                    console.log("⏱️ Triggering simulation via API...");
+                    fetch('/api/simulate')
+                        .then(res => res.json())
+                        .then(data => console.log("✅ Simulation API response:", data))
+                        .catch(err => console.error("❌ Auto-simulation trigger failed", err));
+                }, 2000);
             };
 
             eventSource.onmessage = (event) => {
