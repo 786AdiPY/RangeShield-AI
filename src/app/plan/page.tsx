@@ -7,8 +7,8 @@ import dynamic from 'next/dynamic';
 import { searchCity, GeocodeResult } from '@/lib/geocoding';
 import { fetchWeather, WeatherData } from '@/lib/weather';
 
-// Dynamic import for Leaflet map to avoid SSR issues
-const LeafletMap = dynamic(() => import('@/components/Map/LeafletMap'), {
+// Dynamic import for Google Map to avoid SSR issues
+const GoogleMap = dynamic(() => import('@/components/Map/GoogleMap'), {
     ssr: false,
     loading: () => (
         <div className="w-full h-full flex items-center justify-center bg-zinc-900 text-zinc-500">
@@ -520,15 +520,15 @@ export default function PlanPage() {
                 </div>
             </aside>
 
-            {/* Right Panel - Leaflet Visualization */}
+            {/* Right Panel - Google Map Visualization */}
             <main className="flex-1 relative bg-zinc-950 p-4 pl-0">
                 <div className="w-full h-full rounded-xl overflow-hidden border border-zinc-800 relative shadow-2xl">
-                    <LeafletMap
+                    <GoogleMap
                         encodedPolyline={calculationResult?.polyline}
                         startPos={startLocation ? { lat: parseFloat(startLocation.lat), lon: parseFloat(startLocation.lon) } : undefined}
                         endPos={destinationLocation ? { lat: parseFloat(destinationLocation.lat), lon: parseFloat(destinationLocation.lon) } : undefined}
+                        chargingStations={calculationResult?.charging_stations}
                     />
-
                     <div className="absolute top-4 right-4 w-64 bg-zinc-950/90 border border-zinc-800 backdrop-blur-md shadow-xl z-[1000] rounded-lg">
                         <div className="flex flex-col space-y-1.5 p-4 pb-2">
                             <h3 className="text-sm font-mono text-zinc-400 uppercase leading-none tracking-tight">Live Telemetry</h3>
@@ -544,6 +544,12 @@ export default function PlanPage() {
                                 <span className="text-zinc-500">Duration</span>
                                 <span className="text-zinc-200 font-mono">
                                     {calculationResult ? `${calculationResult.duration_mins} min` : '--'}
+                                </span>
+                            </div>
+                            <div className="flex justify-between items-center text-sm">
+                                <span className="text-zinc-500">Elevation Gain</span>
+                                <span className="text-zinc-200 font-mono text-emerald-400">
+                                    {calculationResult ? `+${calculationResult.total_ascent_m} m` : '--'}
                                 </span>
                             </div>
 

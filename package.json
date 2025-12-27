@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@google-cloud/vertexai": "^1.10.0",
+    "@react-google-maps/api": "^2.20.8",
     "@types/leaflet": "^1.9.21",
     "clsx": "^2.1.1",
     "dotenv": "^17.2.3",

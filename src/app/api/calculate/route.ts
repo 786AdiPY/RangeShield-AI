@@ -1,4 +1,70 @@
 import { NextResponse } from 'next/server';
+import { decodePolyline } from '@/lib/polyline';
+
+// Helper to fetch stations from OCM
+async function fetchChargingStations(lat: number, lng: number, radiusKM: number = 30, maxResults: number = 10) {
+    const apiKey = process.env.OCM_API_KEY;
+    if (!apiKey) return [];
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout to prevent OCM Timeouts
+
+        const params = new URLSearchParams({
+            output: 'json',
+            latitude: lat.toString(),
+            longitude: lng.toString(),
+            distance: radiusKM.toString(), // Look for chargers within radius
+            distanceunit: 'KM',
+            maxresults: maxResults.toString(), // Limit results per stop
+            compact: 'true',
+            verbose: 'false',
+            key: apiKey
+        });
+
+        // console.log(`Fetching OCM: Lat ${lat.toFixed(2)}, Lng ${lng.toFixed(2)}, Radius ${radiusKM}km`);
+
+        const response = await fetch(`https://api.openchargemap.io/v3/poi/?${params}`, {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            console.error(`OCM API failed: ${response.statusText}`);
+            return [];
+        }
+
+        const stations = await response.json();
+        // console.log(`OCM: Found ${stations.length} stations`);
+        return stations;
+    } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') {
+            console.warn("OCM API Timeout");
+        } else {
+            console.error("Error fetching OCM stations:", e);
+        }
+        return [];
+    }
+}
+
+// Simple haversine distance for sampling
+function getDistanceFromLatLonInKm(lat1: number, lon1: number, lat2: number, lon2: number) {
+    const R = 6371; // Radius of the earth in km
+    const dLat = deg2rad(lat2 - lat1);
+    const dLon = deg2rad(lon2 - lon1);
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const d = R * c; // Distance in km
+    return d;
+}
+
+function deg2rad(deg: number) {
+    return deg * (Math.PI / 180);
+}
+
 
 export async function POST(req: Request) {
     try {
@@ -75,17 +141,120 @@ export async function POST(req: Request) {
         const distanceKm = distanceMeters / 1000;
         const durationMins = Math.round(durationSeconds / 60);
 
-        // 2. Open-Meteo API
-        // First Geocode Origin to get Lat/Lng for Weather
-        // We can use the Nominatim logic here again or assume simple geocode.
-        // The prompt says "Use the nominatim or Google Geocoding result to get the lat/lng of the Origin."
-        // Since we are server side, we can call Nominatim.
+        // 1.5 Calculate Elevation Gain (Total Ascent)
+        // User requested logic: Sample 256 points, sum positive climbs.
+        let totalAscent = 0;
+        if (apiKey && encodedPolyline) {
+            try {
+                // Use the encoded polyline directly with the path parameter for Elevation API
+                // https://developers.google.com/maps/documentation/elevation/start#path_requests
+                const elevationRes = await fetch(`https://maps.googleapis.com/maps/api/elevation/json?path=enc:${encodedPolyline}&samples=256&key=${apiKey}`);
 
-        let lat = 37.7749; // Default SF
+                if (elevationRes.ok) {
+                    const elevationData = await elevationRes.json();
+                    if (elevationData.results) {
+                        const elevations = elevationData.results;
+                        // Sum up only the positive climbs
+                        for (let i = 0; i < elevations.length - 1; i++) {
+                            const diff = elevations[i + 1].elevation - elevations[i].elevation;
+                            if (diff > 0) {
+                                totalAscent += diff;
+                            }
+                        }
+                    }
+                } else {
+                    console.error("Elevation API Error:", await elevationRes.text());
+                }
+            } catch (error) {
+                console.error("Elevation Logic Failed:", error);
+            }
+        }
+
+        // --- FETCH CHARGING STATIONS ALONG ROUTE ---
+        let chargingStations: any[] = [];
+        if (encodedPolyline && process.env.OCM_API_KEY) {
+            try {
+                // Decode route
+                const points = decodePolyline(encodedPolyline);
+
+                // Dynamic Sampling: "TotalDistance / 5" (User Request)
+                // If distance > 100km, make sure we sample exactly ~5 times evenly.
+                // If distance is short (< 100km), fallback to a reasonable default like 30km.
+                let samplingInterval = 30;
+                if (distanceKm > 100) {
+                    samplingInterval = distanceKm / 5;
+                }
+
+                console.log(`Route Distance: ${distanceKm.toFixed(1)} km`);
+                console.log(`Sampling interval calculated as ${samplingInterval.toFixed(2)} km.`);
+
+                const samplePoints: [number, number][] = [];
+                // Start empty, we only want points AFTER intervals start (User: "first one after 24 km from source")
+                // Previously we pushed start point, causing confusion.
+
+                let accumulatedDist = 0;
+
+                for (let i = 1; i < points.length; i++) {
+                    // Correct Segment Distance Logic:
+                    // dist(P[i-1], P[i]) adds to the tally.
+                    const d = getDistanceFromLatLonInKm(points[i - 1][0], points[i - 1][1], points[i][0], points[i][1]);
+                    accumulatedDist += d;
+
+                    // Sample every calculated interval
+                    if (accumulatedDist > samplingInterval) {
+                        samplePoints.push(points[i]);
+                        accumulatedDist = 0; // Reset counter for next interval
+
+                        // Strict Cap: Cap at 30 points max
+                        if (samplePoints.length >= 30) break;
+                    }
+                }
+
+                // Ensure we don't miss the end if it's significant
+                // With dist/5 logic, we might end up with 5 or 6 points depending on rounding.
+                // Just let the loop do its job.
+
+                console.log(`Sampling ${samplePoints.length} points for charging stations along route.`);
+
+                // Sequential Fetching to avoid "Too Many Requests" (429)
+                const uniqueStationsMap = new Map();
+
+                for (const pt of samplePoints) {
+                    // Fetch stations near this point
+                    // Dynamic Search Radius: Half the interval ensures we cover the segments without too much overlap
+                    // But allow at least 20km to find something in rural areas
+                    const searchRadius = Math.max(samplingInterval / 1.5, 20);
+
+                    // STRICT LIMIT: Show only ONE charging station per interval
+                    const stations = await fetchChargingStations(pt[0], pt[1], searchRadius, 1);
+
+                    if (stations.length > 0) {
+                        const st = stations[0]; // Take only the first one
+                        if (!uniqueStationsMap.has(st.ID)) {
+                            uniqueStationsMap.set(st.ID, st);
+                        }
+                    }
+
+                    // Simple throttle to respect API rate limits
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                }
+
+                chargingStations = Array.from(uniqueStationsMap.values());
+                console.log(`Found ${chargingStations.length} unique charging stations after filtering.`);
+
+            } catch (error) {
+                console.error("Failed to fetch charging stations:", error);
+            }
+        }
+        // -------------------------------------------
+
+
+
+        let lat = 37.7749;
         let lon = -122.4194;
 
         try {
-            // Quick geocode for origin city name
+
             const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(origin)}`, {
                 headers: { 'User-Agent': 'RangeShield-App-API' }
             });
@@ -98,9 +267,9 @@ export async function POST(req: Request) {
             console.error("Geocoding failed, utilizing defaults");
         }
 
-        // Get Weather
-        let temp = 20; // Default C
-        let wind = 10; // Default km/h
+
+        let temp = 20;
+        let wind = 10;
 
         try {
             const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,wind_speed_10m`);
@@ -113,74 +282,128 @@ export async function POST(req: Request) {
             console.error("Weather API failed, using defaults");
         }
 
-        // 3. Calculation Logic
+        // 3. Calculation Logic (New Physics Engine)
 
-        // Convert avgConsumption from kWh/100km to kWh/km
-        // Input avgConsumption is expected to be kWh/100km according to prompt requirements "The car's baseline energy usage in kWh/100km"
-        // But let's handle if the user passes a small number < 1 which implies kWh/km.
-        let baseConsumptionPerKm = avgConsumption;
-        if (avgConsumption > 2) {
-            // Assume input is kWh/100km (e.g. 18 kWh/100km)
-            baseConsumptionPerKm = avgConsumption / 100;
-        }
-        // If input is 0.2, it remains 0.2 (kWh/km)
+        // Map inputs to the user's function signature
+        const physicsInput = {
+            distance_km: distanceKm,
+            elevation_gain_m: totalAscent, // From 1.5
+            vehicle_temp_c: body.vehicleTemp || 25, // Default if not passed (though we updated frontend)
+            external_temp_c: temp, // From Open-Meteo
+            cargo_mass_kg: parseFloat(cargoWeight),
+            battery_capacity: parseFloat(batteryCapacity),
+            soh: body.soh || 100, // Default 100 if missing
+            soc: parseFloat(initialBatteryPct),
+            base_efficiency: parseFloat(avgConsumption), // kWh/km or kWh/100km? User logic simply multiplies: distance * base. 
+            // If distance is KM, base must be kWh/km. 
+            // Frontend input is 0.2 (kWh/km). 
+            // Prompt was "baseline in kWh/100km", but if user inputs 0.2, it's km.
+            // Let's normalize: if > 5, it's probably 100km.
+            // Actually, let's keep the user's literal function logic below.
 
-        // Ideal Energy
-        const idealEnergyKwh = distanceKm * baseConsumptionPerKm;
+            tire_pressure_psi: body.tirePressure || 35,
+            wind_speed_kmh: wind // From Open-Meteo
+        };
 
-        // Apply Penalties
-        let penaltyFactor = 1.0;
-
-        // Load Penalty: +2% for every 50kg > 100kg
-        const totalPayload = (passengers * 75) + cargoWeight;
-        if (totalPayload > 100) {
-            const extraWeight = totalPayload - 100;
-            const penaltyUnits = Math.floor(extraWeight / 50);
-            penaltyFactor += (penaltyUnits * 0.02);
-        }
-
-        // Temp Penalty: If temp < 10°C, +15%
-        if (temp < 10) {
-            penaltyFactor += 0.15;
+        // Normalize efficiency for the function: The function does `distance_km * base_efficiency`.
+        // So base_efficiency MUST be kWh/km.
+        if (physicsInput.base_efficiency > 2) {
+            physicsInput.base_efficiency = physicsInput.base_efficiency / 100;
         }
 
-        // Wind Penalty: If wind > 20 km/h, +10%
-        if (wind > 20) {
-            penaltyFactor += 0.10;
+        // --- User's Physics Function ---
+        function calculateEnergyUsage(input: any) {
+            const {
+                distance_km,
+                elevation_gain_m,
+                vehicle_temp_c,
+                external_temp_c,
+                cargo_mass_kg,
+                battery_capacity,
+                soh,
+                soc,
+                base_efficiency,
+                tire_pressure_psi,
+                wind_speed_kmh
+            } = input;
+
+            const GRAVITY = 9.81;
+            const VEHICLE_MASS = 2100;
+            const STANDARD_PRESSURE = 35;
+
+            let energy_kwh = distance_km * base_efficiency;
+
+            const total_mass = VEHICLE_MASS + cargo_mass_kg;
+
+            // Fix: handle potential undefined elevation
+            const safe_elevation = elevation_gain_m || 0;
+
+            const potential_energy_joules = total_mass * GRAVITY * safe_elevation;
+            const potential_energy_kwh = potential_energy_joules / 3600000;
+
+            if (potential_energy_kwh > 0) {
+                energy_kwh += potential_energy_kwh;
+            }
+
+            if (tire_pressure_psi < STANDARD_PRESSURE) {
+                const pressure_diff = STANDARD_PRESSURE - tire_pressure_psi;
+                const pressure_penalty = 1 + (pressure_diff * 0.003);
+                energy_kwh *= pressure_penalty;
+            }
+
+            if (vehicle_temp_c < 15 || vehicle_temp_c > 35) {
+                energy_kwh *= 1.10;
+            }
+
+            const temp_diff = Math.abs(external_temp_c - 20);
+            if (temp_diff > 0) {
+                energy_kwh *= (1 + (temp_diff * 0.01));
+            }
+
+            if (wind_speed_kmh > 0) {
+                energy_kwh *= (1 + (wind_speed_kmh * 0.005));
+            }
+
+            const effective_capacity = battery_capacity * (soh / 100);
+            const current_energy = effective_capacity * (soc / 100);
+
+            const real_efficiency = distance_km > 0 ? energy_kwh / distance_km : 0;
+
+            return {
+                energy_needed_kwh: parseFloat(energy_kwh.toFixed(2)),
+                remaining_range_km: real_efficiency > 0 ? ((current_energy - energy_kwh) / real_efficiency).toFixed(1) : "0",
+                is_possible: current_energy > energy_kwh,
+                arrival_soc: effective_capacity > 0 ? Math.max(0, Math.round(((current_energy - energy_kwh) / effective_capacity) * 100)) : 0
+            };
         }
+        // -------------------------------
 
-        // Traffic Penalty: Speed < 30km/h -> +10%
-        const avgSpeedKmH = distanceKm / (durationMins / 60);
-        if (avgSpeedKmH < 30) {
-            penaltyFactor += 0.10;
-        }
+        const result = calculateEnergyUsage(physicsInput);
 
-        const predictedEnergyKwh = idealEnergyKwh * penaltyFactor;
-
-        // Range Analysis
-        const currentBatteryKwh = batteryCapacity * (initialBatteryPct / 100);
-
-        const remainingKwhStandard = currentBatteryKwh - idealEnergyKwh;
-        const remainingKwhPredicted = currentBatteryKwh - predictedEnergyKwh;
-
-        const arrivalSocStandard = Math.max(0, Math.round((remainingKwhStandard / batteryCapacity) * 100));
-        const arrivalSocPredicted = Math.max(0, Math.round((remainingKwhPredicted / batteryCapacity) * 100));
-
-        const status = arrivalSocPredicted < 10 ? 'CRITICAL' : 'SAFE';
+        const status = result.arrival_soc < 10 ? 'CRITICAL' : 'SAFE';
 
         return NextResponse.json({
             distance_km: parseFloat(distanceKm.toFixed(2)),
             duration_mins: durationMins,
+            total_ascent_m: Math.round(totalAscent), // Explicitly return this now
             weather: { temp, wind },
-            consumption: avgConsumption,
-            standard_kwh: parseFloat(idealEnergyKwh.toFixed(2)),
-            predicted_kwh: parseFloat(predictedEnergyKwh.toFixed(2)),
+            consumption: physicsInput.base_efficiency,
+
+            // Map new result to old structure key names for compatibility
+            standard_kwh: parseFloat((distanceKm * physicsInput.base_efficiency).toFixed(2)), // Base ideal
+            predicted_kwh: result.energy_needed_kwh,
+
             range_analysis: {
-                arrival_soc_standard: arrivalSocStandard,
-                arrival_soc_predicted: arrivalSocPredicted,
-                status,
+                arrival_soc_standard: 0, // Deprecated or re-calc if needed
+                arrival_soc_predicted: result.arrival_soc,
+                status: status,
+                details: {
+                    base_consumption_kwh: (distanceKm * physicsInput.base_efficiency).toFixed(2),
+                    total_energy_kwh: result.energy_needed_kwh
+                }
             },
-            polyline: encodedPolyline
+            polyline: encodedPolyline,
+            charging_stations: chargingStations // Include stations in response
         });
 
     } catch (error) {
