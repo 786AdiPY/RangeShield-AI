@@ -6,6 +6,8 @@ import dynamic from 'next/dynamic';
 
 import { searchCity, GeocodeResult } from '@/lib/geocoding';
 import { fetchWeather, WeatherData } from '@/lib/weather';
+import CoPilotCard from '@/components/CoPilot/CoPilotCard';
+import ChatInterface from '@/components/CoPilot/ChatInterface';
 
 // Dynamic import for Google Map to avoid SSR issues
 const GoogleMap = dynamic(() => import('@/components/Map/GoogleMap'), {
@@ -40,12 +42,18 @@ export default function PlanPage() {
     const [weather, setWeather] = useState<WeatherData | null>(null);
     const [loadingWeather, setLoadingWeather] = useState(false);
     const [calculationResult, setCalculationResult] = useState<any>(null); // Store API response
+    const [error, setError] = useState<string | null>(null);
 
     // Stream State
     const [vehicleTemp, setVehicleTemp] = useState<number | null>(null);
     const [tirePressure, setTirePressure] = useState<number>(35); // Default 35 PSI
     const [soh, setSoh] = useState<number | null>(null);
     const [isStreamConnected, setIsStreamConnected] = useState(false);
+
+    // Co-Pilot State
+    const [coPilotSuggestion, setCoPilotSuggestion] = useState<string | null>(null);
+    const [isChatOpen, setIsChatOpen] = useState(false);
+    const [coPilotContext, setCoPilotContext] = useState<any>(null);
 
     // Stream Integration
     React.useEffect(() => {
@@ -168,9 +176,51 @@ export default function PlanPage() {
             }
 
             setRangeCalculated(true);
-        } catch (err) {
+
+            // --- Trigger Co-Pilot Suggestion ---
+            try {
+                const contextData = {
+                    telemetry: {
+                        range_km: data.range_analysis.remaining_range,
+                        arrival_soc: data.range_analysis.arrival_soc_predicted,
+                        efficiency: energyConsumption // Use the direct state variable
+                    },
+                    trip: {
+                        distance_km: data.distanceKm,
+                        duration_mins: data.durationMins
+                    },
+                    user: {
+                        passengers: passengers, // Use the direct state variable
+                        payload: cargo // Use the direct state variable
+                    },
+                    chargers: data.chargingStations ? data.chargingStations.slice(0, 5) : [] // Send first 5 relevant chargers
+                };
+
+                setCoPilotContext(contextData);
+
+                // Initial Message to get suggestion
+                // We send a "system" style trigger or just an empty user message with context to prompt the greeting/suggestion
+                const coPilotRes = await fetch('/api/copilot', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messages: [{ role: 'user', content: "Analyze my route and provide a strategy." }], // Trigger prompt
+                        context: contextData
+                    })
+                });
+
+                const coPilotJson = await coPilotRes.json();
+                if (coPilotJson.reply) {
+                    setCoPilotSuggestion(coPilotJson.reply);
+                }
+            } catch (aiError: any) {
+                console.error("Co-Pilot failed to initialize:", aiError);
+                // Optionally set an error for Co-Pilot specifically
+            }
+
+        } catch (err: any) {
             console.error(err);
-            // Handle error (maybe show toast)
+            setError(err.message || 'Calculation failed');
         } finally {
             setLoadingWeather(false);
         }
@@ -458,6 +508,15 @@ export default function PlanPage() {
                         START NAVIGATION
                     </button>
 
+                    {/* Co-Pilot Suggestion Card */}
+                    {coPilotSuggestion && (
+                        <CoPilotCard
+                            suggestion={coPilotSuggestion}
+                            onClick={() => setIsChatOpen(true)}
+                        />
+                    )}
+
+
                 </div>
 
                 {weather && (
@@ -564,6 +623,13 @@ export default function PlanPage() {
                     </div>
                 </div>
             </main>
+            {/* Concierge Chat Interface */}
+            <ChatInterface
+                isOpen={isChatOpen}
+                onClose={() => setIsChatOpen(false)}
+                initialContext={coPilotContext}
+                initialSuggestion={coPilotSuggestion || undefined}
+            />
         </div>
     );
 }

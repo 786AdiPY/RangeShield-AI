@@ -396,6 +396,7 @@ export async function POST(req: Request) {
             range_analysis: {
                 arrival_soc_standard: 0, // Deprecated or re-calc if needed
                 arrival_soc_predicted: result.arrival_soc,
+                remaining_range: result.remaining_range_km, // Exposed for Co-Pilot
                 status: status,
                 details: {
                     base_consumption_kwh: (distanceKm * physicsInput.base_efficiency).toFixed(2),

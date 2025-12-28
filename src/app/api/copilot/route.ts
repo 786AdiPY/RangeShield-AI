@@ -1,22 +1,43 @@
 import { NextResponse } from 'next/server';
+import { VertexAI } from '@google-cloud/vertexai';
 
-// SYSTEM PROMPT directly from User Requirement
-const SYSTEM_PROMPT = `
-ROLE:
-You are "RangeShield Co-Pilot," an expert EV Race Strategist and Navigation Assistant.
-Your goal is to guide the user safely from Start to Destination with optimal energy usage.
-
-CORE BEHAVIORS:
-1. **Analyze Physics First:** Always prioritize the "Safety Score" from the simulation. If Arrival SOC < 10%, you MUST recommend the "Eco" strategy.
-2. **Charger Integration:** You have a list of real-time charging stations (provided in context). Recommendation logic:
-   - If User needs a stop: Suggest the charger with the highest power (kW) closest to the midway point.
-   - If User is safe: Suggest a charger only "for a quick coffee stop" if asked.
-3. **Strict Boundaries:**
-   - YOU DO NOT answer questions about politics, coding, cooking, or general knowledge.
-   - If asked "Who is the president?" or "Write me a poem", reply EXACTLY:
-     "I am tuned exclusively for EV telemetry and trip planning. Let's focus on your range anxiety."
-4. **Tone:** Professional, Concise, slight "Race Engineer" personality.
-`;
+// SYSTEM_PROMPT directly from User Requirement
+const SYSTEM_PROMPT = [
+    "## ROLE & OBJECTIVE",
+    "You are 'RangeShield Co-Pilot', an elite EV Race Strategist and Intelligent Navigation Assistant.",
+    "Your SOLE purpose is to guide the user safely to their destination by optimizing energy, speed, and charging stops.",
+    "You possess real-time telemetry, physics simulation data, and a live feed of charging stations.",
+    "",
+    "## INPUT CONTEXT (You will receive this JSON data)",
+    "- **Telemetry:** Current Speed, SOC (Battery %), SOH (Health), Tire Pressure, Motor Temp.",
+    "- **Trip:** Distance Remaining, ETA, Current Weather (Wind/Temp).",
+    "- **Physics Engine:** 'Normal Mode' Arrival % vs. 'Eco Mode' Arrival %.",
+    "- **Chargers:** A list of verified Open Charge Map stations ahead.",
+    "",
+    "## CORE DECISION PROTOCOLS",
+    "1. **The '10% Rule' (CRITICAL):**",
+    "   - IF 'Normal Mode' Arrival SOC is < 10%: You MUST strictly advise the user to switch to Eco Mode or plan a charge.",
+    "   - Use clear, urgent language: 'Critical Range Alert. Reduce speed to 85km/h immediately to extend range by 15km.'",
+    "",
+    "2. **Intelligent Charging Strategy:**",
+    "   - DO NOT just list chargers. Recommend the *single best option* based on the user's situation.",
+    "   - *Scenario A (Critical):* Suggest the closest Fast Charger (High kW).",
+    "   - *Scenario B (Comfort):* Suggest a charger near the halfway point with amenities (food/rest).",
+    "",
+    "3. **Tactical Terrain Analysis:**",
+    "   - If the user asks about the road ahead, analyze the 'Elevation Lookahead' data.",
+    "   - Advise on regenerative braking: 'Steep descent ahead. Engage Max Regen to recover ~2% battery.'",
+    "",
+    "## STRICT BEHAVIORAL GUARDRAILS",
+    "1. **Domain Isolation:** You are NOT a general purpose AI. You DO NOT know about politics, history, cooking, or code.",
+    "   - *Trigger:* If asked 'Who won the election?' or 'How do I make pasta?'",
+    "   - *Response:* 'I am tuned exclusively for real-time EV telemetry and trip optimization. Let's focus on your battery levels.'",
+    "2. **Conciseness:** Keep responses under 40 words unless explaining a complex strategy. Drivers cannot read long essays.",
+    "3. **Tone:** Professional, Calm, Authoritative (like an F1 Race Engineer).",
+    "",
+    "## OUTPUT FORMAT",
+    "Provide plain text responses formatted for a Heads-Up Display (short paragraphs, bullet points for lists)."
+].join("\n");
 
 export async function POST(req: Request) {
     try {
@@ -24,7 +45,7 @@ export async function POST(req: Request) {
         const { messages, context } = body;
         // context contains: { telemetry, trip, user, chargers }
 
-        // Construct the full prompt context if this is the first message or if context is updated
+        // Construct the full prompt context
         let fullPrompt = "";
 
         if (context) {
@@ -42,52 +63,92 @@ ${JSON.stringify(context.chargers)}
 
         const userMessage = messages[messages.length - 1].content;
 
-        // --- GEMINI / VERTEX AI INTEGRATION ---
-        // For this implementation, we will try to use the Gemini API key if available, 
-        // or fall back to a "Mock Race Engineer" for development stability if no key is set.
-
-        const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-
-        if (apiKey) {
-            // Call Gemini API (Generative Language API)
-            const aiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [
-                        { role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + fullPrompt + "\n\nUser: " + userMessage }] }
-                    ]
-                })
+        // --- VERTEX AI SDK INTEGRATION ---
+        console.log("Attempting Vertex AI SDK Call...");
+        let lastError = null;
+        try {
+            // Initialize Vertex AI
+            const vertex_ai = new VertexAI({
+                project: 'rangeai',
+                location: 'us-central1'
             });
 
-            if (aiRes.ok) {
-                const data = await aiRes.json();
-                if (data.candidates && data.candidates.length > 0) {
-                    const reply = data.candidates[0].content.parts[0].text;
+            // Instantiate the model
+            const generativeModel = vertex_ai.getGenerativeModel({
+                model: 'gemini-2.5-pro'
+            });
+
+            const req = {
+                contents: [{
+                    role: 'user',
+                    parts: [{ text: SYSTEM_PROMPT + "\n\n" + fullPrompt + "\n\nUser: " + userMessage }]
+                }]
+            };
+
+            const streamingResp = await generativeModel.generateContent(req);
+            const response = await streamingResp.response;
+
+            if (response.candidates && response.candidates.length > 0 && response.candidates[0].content && response.candidates[0].content.parts) {
+                const reply = response.candidates[0].content.parts[0].text;
+                if (reply) {
                     return NextResponse.json({ reply });
                 }
-            } else {
-                console.error("AI API Error:", await aiRes.text());
-                // Fallthrough to mock
             }
+            throw new Error("No candidates returned from Vertex AI");
+
+        } catch (vertexError: any) {
+            console.error("Vertex AI Error:", vertexError);
+            console.log("Falling back to Rule-Based Co-Pilot.");
+            lastError = vertexError;
+            // Fallthrough to mock logic below
         }
 
-        // --- FALLBACK MOCK (If no key or API error) ---
-        // This ensures the UI works for the user immediately.
-        console.log("Using Mock AI (Race Engineer)");
+        // --- FALLBACK MOCK (Rule-Based "Smart" Reply) ---
+        console.log("Using Smart Mock AI");
 
         let mockReply = "";
 
-        // Simple heuristic for the mock
-        if (context && context.telemetry.arrival_soc < 10) {
-            mockReply = "Copy that. Telemetry indicates critical Arrival SOC. Recommendation: Switch to ECO mode immediately. Maintain speed under 90km/h. I've flagged a high-power charger 45km ahead for a mandatory splash-and-dash.";
+        if (context) {
+            const soc = context.telemetry.arrival_soc;
+            const range = context.telemetry.range_km;
+            const diet = userMessage.toLowerCase();
+            const chargers = context.chargers || [];
+
+            // Dynamic Rule Engine
+            if (diet.includes("cargo") || diet.includes("weight") || diet.includes("passenger")) {
+                mockReply = `Payload Analysis: You are currently carrying ${context.user.passengers} pax. Adding more weight will increase rolling resistance and drag. Arrival SOC is currently ${soc}%. Keep it light if possible. [Offline Mode]`;
+            }
+            else if (diet.includes("speed") || diet.includes("fast") || diet.includes("slow")) {
+                mockReply = `Velocity Advisory: Aerodynamic drag increases quadratically with speed. Using "Eco" speeds (under 100km/h) is the most effective way to boost your buffer. Current prediction: ${soc}% Arrival SOC. [Offline Mode]`;
+            }
+            else if (diet.includes("charge") || diet.includes("station") || diet.includes("stop")) {
+                if (chargers.length > 0) {
+                    const best = chargers[0]; // Assuming sorted or just taking first
+                    mockReply = `Charging Strategy: I've identified ${chargers.length} viable stations. The best option is ${best.AddressInfo?.Title || "Station"} (${best.AddressInfo?.Distance?.toFixed(1) || "?"}km away). It fits your route perfectly. [Offline Mode]`;
+                } else {
+                    mockReply = `Charging Update: I am not detecting high-confidence chargers on this immediate vector. However, with ${soc}% arrival charge, you don't strictly *need* a stop, but keep an eye on the gauge. [Offline Mode]`;
+                }
+            }
+            else if (diet.includes("weather") || diet.includes("rain") || diet.includes("temp")) {
+                mockReply = `Environmental Factors: Cabin heating/cooling can consume 1-3kW. If range is tight (${range}km remaining), consider using seat warmers instead of cabin air. [Offline Mode]`;
+            }
+            else if (diet.includes("hello") || diet.includes("hi") || diet.includes("hey")) {
+                mockReply = `Connected. RangeShield Co-Pilot online. Tracking your telemetry. I'm reading ${range}km of range. How can I assist? [Offline Mode]`;
+            }
+            else {
+                // Default Status Report
+                if (soc < 15) {
+                    mockReply = `CRITICAL ALERT: Arrival SOC is ${soc}%. This is below safety margins. Recommendation: REDUCE SPEED and plan a charging stop immediately. [Offline Mode]`;
+                } else {
+                    mockReply = `Status Nominal. Arrival SOC predicted at ${soc}%. You have a ${range}km buffer. You are clear to proceed so long as conditions remain stable. [Offline Mode]`;
+                }
+            }
         } else {
-            mockReply = "Telemetry looks nominal. You're clear to push. Arrival SOC is green. If you need a caffeine hit, there's a 150kW station near the halfway mark, but it's optional.";
+            mockReply = "System initializing... Telemetry link established. Ready for input. [Offline Mode]";
         }
 
-        // If it's a follow up chat
-        if (!context && userMessage.length > 0) {
-            mockReply = "Affirmative. I'm monitoring the data. Keep your eyes on the road.";
+        if (lastError) {
+            mockReply += ` (Error: ${lastError.message || JSON.stringify(lastError)})`;
         }
 
         return NextResponse.json({ reply: mockReply });
