@@ -194,18 +194,18 @@ function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStation
             )}
 
             {/* Start Marker */}
-            {startPos && (
+            {(startPos || path.length > 0) && (
                 <Marker
-                    position={{ lat: startPos.lat, lng: startPos.lon }}
+                    position={startPos ? { lat: startPos.lat, lng: startPos.lon } : path[0]}
                     label="S"
                     title="Start"
                 />
             )}
 
             {/* End Marker */}
-            {endPos && (
+            {(endPos || path.length > 0) && (
                 <Marker
-                    position={{ lat: endPos.lat, lng: endPos.lon }}
+                    position={endPos ? { lat: endPos.lat, lng: endPos.lon } : path[path.length - 1]}
                     label="D"
                     title="Destination"
                 />
