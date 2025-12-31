@@ -499,6 +499,23 @@ export default function PlanPage() {
                 <div className="space-y-4 mt-auto">
                     <button
                         disabled={!rangeCalculated}
+                        onClick={() => {
+                            if (calculationResult) {
+                                const tripPayload = {
+                                    result: calculationResult,
+                                    route: {
+                                        encodedPolyline: calculationResult.polyline,
+                                        chargingStations: calculationResult.charging_stations
+                                    },
+                                    start: startLocation ? { lat: parseFloat(startLocation.lat), lon: parseFloat(startLocation.lon) } : undefined,
+                                    end: destinationLocation ? { lat: parseFloat(destinationLocation.lat), lon: parseFloat(destinationLocation.lon) } : undefined,
+                                    passengers: passengers, // Persist context
+                                    cargo: cargo
+                                };
+                                localStorage.setItem('rangeShield_activeTrip', JSON.stringify(tripPayload));
+                                window.location.href = '/trip'; // Force full nav to ensure clean state
+                            }
+                        }}
                         className={`inline-flex items-center justify-center rounded-md text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 w-full h-14 font-bold tracking-widest transition-all ${rangeCalculated
                             ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)] cursor-pointer'
                             : 'bg-zinc-800 text-zinc-600 cursor-not-allowed'

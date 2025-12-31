@@ -17,6 +17,7 @@ interface MapProps {
     encodedPolyline?: string;
     startPos?: { lat: number, lon: number };
     endPos?: { lat: number, lon: number };
+    chargingStations?: any[]; // Array of OCM stations
 }
 
 // Component to handle map view updates
@@ -30,7 +31,7 @@ function MapUpdater({ bounds }: { bounds: L.LatLngBoundsExpression | null }) {
     return null;
 }
 
-const MainMap = ({ encodedPolyline, startPos, endPos }: MapProps) => {
+const MainMap = ({ encodedPolyline, startPos, endPos, chargingStations }: MapProps) => {
     const [routeCoords, setRouteCoords] = useState<[number, number][]>([]);
     const [bounds, setBounds] = useState<L.LatLngBoundsExpression | null>(null);
 
@@ -113,6 +114,18 @@ const MainMap = ({ encodedPolyline, startPos, endPos }: MapProps) => {
                     <Popup className="text-black">Destination</Popup>
                 </Marker>
             )}
+
+            {chargingStations && chargingStations.map((station: any, idx: number) => (
+                <Marker
+                    key={station.ID || idx}
+                    position={[station.AddressInfo.Latitude, station.AddressInfo.Longitude]}
+                >
+                    <Popup className="text-black">
+                        <div className="font-bold">{station.AddressInfo.Title}</div>
+                        <div className="text-xs">{station.AddressInfo.Distance?.toFixed(1)} km away</div>
+                    </Popup>
+                </Marker>
+            ))}
 
             <MapUpdater bounds={bounds} />
         </MapContainer>
