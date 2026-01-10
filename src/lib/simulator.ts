@@ -23,10 +23,8 @@ export async function runSimulation() {
         connectionTimeout: 10000,
         authenticationTimeout: 10000,
         retry: {
-            initialRetryTime: 1000,
-            retries: 5,
-            factor: 0.2,
-            multiplier: 2
+            initialRetryTime: 100,
+            retries: 8
         }
     });
 

@@ -15,6 +15,9 @@ interface GoogleMapProps {
     startPos?: { lat: number; lon: number };
     endPos?: { lat: number; lon: number };
     chargingStations?: Station[];
+    tilt?: number;
+    heading?: number;
+    vehiclePosition?: { lat: number; lng: number; heading: number };
 }
 
 const containerStyle = {
@@ -22,10 +25,10 @@ const containerStyle = {
     height: '100%'
 };
 
-// Dark Mode Map Styles
-const mapOptions: google.maps.MapOptions = {
+// Dark Mode Map Styles (Base)
+const baseMapOptions: google.maps.MapOptions = {
     disableDefaultUI: true,
-    zoomControl: true,
+    zoomControl: false, // Cleaner cockpit UI
     styles: [
         { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
         { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
@@ -111,23 +114,31 @@ const mapOptions: google.maps.MapOptions = {
 // SVG Icon for Green Bolt
 // SVG Icon for Green Pin with Bolt (Matches User Request)
 const greenBoltIcon = {
-    // Path: A map marker shape (approximate) with a lightning bolt cut-out or overlay
-    // Utilizing a standard pin path and overlaying a bolt might be complex with one path.
-    // Instead using a path that draws a pin and a bolt inside.
-    // M 12 2 C 8.13 2 5 5.13 5 9 c 0 5.25 7 13 7 13 s 7 -7.75 7 -13 c 0 -3.87 -3.13 -7 -7 -7 Z M 11 14 L 11 10 L 8 10 L 13 4 L 13 8 L 16 8 L 11 14 Z
     path: "M 12 2 C 8.13 2 5 5.13 5 9 c 0 5.25 7 13 7 13 s 7 -7.75 7 -13 c 0 -3.87 -3.13 -7 -7 -7 Z M 11.5 14.5 L 11.5 10 L 8.5 10 L 13.5 4 L 13.5 8 L 16.5 8 L 11.5 14.5 Z",
-    fillColor: "#4CAF50", // Material Green 500
+    fillColor: "#4CAF50",
     fillOpacity: 1,
     strokeWeight: 1,
-    strokeColor: "#1B5E20", // Dark Green border
+    strokeColor: "#1B5E20",
     rotation: 0,
     scale: 1.5,
-    anchor: { x: 12, y: 22 } // Tip of the pin
+    anchor: { x: 12, y: 22 }
 };
+
+// Navigation Arrow Icon (Blue triangle pointer like Google Maps)
+const createNavigationArrowIcon = (heading: number): google.maps.Symbol => ({
+    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+    fillColor: "#4285F4",
+    fillOpacity: 1,
+    strokeColor: "#1a73e8",
+    strokeWeight: 2,
+    scale: 8,
+    rotation: heading,
+    anchor: new google.maps.Point(0, 2.5)
+});
 
 const libraries: ("geometry" | "drawing" | "places" | "visualization")[] = ['geometry'];
 
-function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStations = [] }: GoogleMapProps) {
+function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStations = [], tilt = 0, heading = 0, vehiclePosition }: GoogleMapProps) {
     const { isLoaded } = useJsApiLoader({
         id: 'google-map-script',
         googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
@@ -135,6 +146,26 @@ function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStation
     });
 
     const [map, setMap] = useState<google.maps.Map | null>(null);
+
+    // Apply tilt once when navigation starts (prevent shaking)
+    React.useEffect(() => {
+        if (map && tilt > 0) {
+            // Set tilt and zoom once for navigation mode
+            map.setTilt(45);
+            map.setZoom(17);
+        } else if (map && tilt === 0) {
+            map.setTilt(0);
+        }
+    }, [map, tilt]);
+
+    // Smooth camera follow for vehicle position (no heading rotation to prevent shaking)
+    React.useEffect(() => {
+        if (map && vehiclePosition) {
+            // Only pan to vehicle position - arrow marker shows direction
+            map.panTo({ lat: vehiclePosition.lat, lng: vehiclePosition.lng });
+            // Note: Heading rotation removed to prevent map shaking
+        }
+    }, [map, vehiclePosition]);
 
     const onLoad = useCallback(function callback(map: google.maps.Map) {
         setMap(map);
@@ -179,7 +210,7 @@ function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStation
             zoom={10}
             onLoad={onLoad}
             onUnmount={onUnmount}
-            options={mapOptions}
+            options={baseMapOptions}
         >
             {/* Route Polyline */}
             {path.length > 0 && (
@@ -208,6 +239,16 @@ function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStation
                     position={endPos ? { lat: endPos.lat, lng: endPos.lon } : path[path.length - 1]}
                     label="D"
                     title="Destination"
+                />
+            )}
+
+            {/* Vehicle Navigation Pointer */}
+            {vehiclePosition && (
+                <Marker
+                    position={{ lat: vehiclePosition.lat, lng: vehiclePosition.lng }}
+                    icon={createNavigationArrowIcon(vehiclePosition.heading)}
+                    title="Your Vehicle"
+                    zIndex={1000}
                 />
             )}
 

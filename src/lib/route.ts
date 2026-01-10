@@ -10,19 +10,15 @@ export async function GET(request: Request) {
             const kafka = new Kafka({
                 clientId: 'frontend-bridge',
                 brokers: ['pkc-xrnwx.asia-south2.gcp.confluent.cloud:9092'],
-                ssl: {
-                    rejectUnauthorized: false // Allow self-signed certs
-                },
+                ssl: true,
                 sasl: {
                     mechanism: 'plain',
                     username: process.env.CONFLUENT_API_KEY!,
                     password: process.env.CONFLUENT_API_SECRET!,
                 },
-                connectionTimeout: 30000, // 30 seconds
-                authenticationTimeout: 30000,
                 retry: {
-                    initialRetryTime: 300,
-                    retries: 10
+                    initialRetryTime: 100,
+                    retries: 8
                 }
             });
 

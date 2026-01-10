@@ -55,63 +55,33 @@ export default function PlanPage() {
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [coPilotContext, setCoPilotContext] = useState<any>(null);
 
-    // Stream Integration
+    // Telemetry Integration (Static Snapshot)
     React.useEffect(() => {
-        let eventSource: EventSource | null = null;
+        const fetchTelemetrySnapshot = async () => {
+            try {
+                // Fetch static snapshot strictly for planning
+                console.log("📸 Fetching static telemetry snapshot...");
+                const res = await fetch('/api/simulate?mode=snapshot');
+                const json = await res.json();
 
-        try {
-            eventSource = new EventSource('/api/calculate/stream');
+                if (json.success && json.data && json.data.payload) {
+                    const data = json.data.payload;
+                    console.log("✅ Static Snapshot loaded:", data);
 
-            eventSource.onopen = () => {
-                setIsStreamConnected(true);
-                // console.log("Stream Connected");
-
-                // Trigger simulation on page load (via API)
-                setTimeout(() => {
-                    console.log("⏱️ Triggering simulation via API...");
-                    fetch('/api/simulate')
-                        .then(res => res.json())
-                        .then(data => console.log("✅ Simulation API response:", data))
-                        .catch(err => console.error("❌ Auto-simulation trigger failed", err));
-                }, 2000);
-            };
-
-            eventSource.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    // Support both keys just in case
-                    const tempVal = data.vehicle_temp !== undefined ? data.vehicle_temp : data.temp;
-                    if (tempVal !== undefined) setVehicleTemp(Number(tempVal));
-
-                    // Current Charge -> State of Charge
-                    if (data.currentCharge !== undefined) setBattery(Number(data.currentCharge));
-                    if (data.soc !== undefined) setBattery(Number(data.soc)); // Support explicit soc key
-
-                    // Tire Pressure
+                    // Update state with static values
+                    if (data.vehicle_temp !== undefined) setVehicleTemp(Number(data.vehicle_temp));
+                    if (data.soc !== undefined) setBattery(Number(data.soc));
                     if (data.tire_pressure !== undefined) setTirePressure(Number(data.tire_pressure));
-
-                    // SOH (State of Health)
                     if (data.soh !== undefined) setSoh(Number(data.soh));
-                } catch (e) {
-                    console.error("Error parsing stream data", e);
+
+                    setIsStreamConnected(true); // Connected to "Static Data Source"
                 }
-            };
-
-            eventSource.onerror = (err) => {
-                console.error("Stream Error:", err);
-                setIsStreamConnected(false);
-                eventSource?.close();
-            };
-
-        } catch (error) {
-            console.error("Failed to connect to stream:", error);
-        }
-
-        return () => {
-            if (eventSource) {
-                eventSource.close();
+            } catch (error) {
+                console.error("Failed to fetch telemetry snapshot:", error);
             }
         };
+
+        fetchTelemetrySnapshot();
     }, []);
 
     const handleCitySearch = async (query: string, type: 'start' | 'destination') => {
@@ -448,8 +418,8 @@ export default function PlanPage() {
                                         type="number"
                                         min="20"
                                         max="50"
-                                        value={tirePressure}
-                                        onChange={(e) => setTirePressure(parseInt(e.target.value))}
+                                        value={Number.isNaN(tirePressure) ? '' : tirePressure}
+                                        onChange={(e) => setTirePressure(parseInt(e.target.value) || 0)}
                                         className="flex h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent transition-all"
                                     />
                                 </div>
