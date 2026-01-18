@@ -86,32 +86,9 @@ When a critical threshold is breached:
 * Google Maps API Key (Places, Directions, Elevation enabled)
 * Confluent Cloud Cluster
 
-### Installation
-
-1. **Clone the repo**
-```bash
-git clone https://github.com/your-username/rangeshield-ai.git
-cd rangeshield-ai
-
-```
 
 
-2. **Install dependencies**
-```bash
-npm install
 
-```
-
-
-3. **Environment Setup**
-Rename `.env.example` to `.env.local` and add your keys:
-```env
-NEXT_PUBLIC_GOOGLE_MAPS_KEY=your_key
-CONFLUENT_API_KEY=your_key
-CONFLUENT_SECRET=your_secret
-CONFLUENT_BOOTSTRAP_SERVER=your_server
-
-```
 
 
 
@@ -144,12 +121,6 @@ npx tsx scripts/guardian_worker.ts
 ```
 
 ---
-
-## Screenshots
-
-| Route Planning | Telemetry HUD |
-| --- | --- |
-|  |  |
 
 ---
 
