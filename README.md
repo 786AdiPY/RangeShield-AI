@@ -3,7 +3,7 @@
 # 🛡️ RangeShield AI
 
 **RangeShield AI** eliminates EV "Range Anxiety" by transforming static navigation into a dynamic, battery-aware guardian system. It leverages **Next.js**, **Kafka Streaming**, and **Predictive Terrain Analysis** to prevent battery depletion before it happens.
-
+ 
 ---
 
 ## High-Level System Overview
