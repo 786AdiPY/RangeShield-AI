@@ -123,5 +123,3 @@ npx tsx scripts/guardian_worker.ts
 ---
 
 ---
-
-**Built for AI Partner Catalyst 2026.**
