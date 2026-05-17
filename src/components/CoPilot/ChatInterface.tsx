@@ -9,11 +9,13 @@ interface Message {
 interface ChatInterfaceProps {
     isOpen: boolean;
     onClose: () => void;
-    initialContext?: any; // Telemetry data
+    initialContext?: any;
+    context?: any;       // live context — takes priority over initialContext
     initialSuggestion?: string;
 }
 
-export default function ChatInterface({ isOpen, onClose, initialContext, initialSuggestion }: ChatInterfaceProps) {
+export default function ChatInterface({ isOpen, onClose, initialContext, context: liveContext, initialSuggestion }: ChatInterfaceProps) {
+    const activeContext = liveContext ?? initialContext;
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -47,7 +49,7 @@ export default function ChatInterface({ isOpen, onClose, initialContext, initial
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     messages: [...messages, userMsg],
-                    context: initialContext // Always send context so the API knows the telemetry
+                    context: activeContext,
                 })
             });
 

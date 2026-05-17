@@ -1,160 +1,212 @@
 import { NextResponse } from 'next/server';
-import { VertexAI } from '@google-cloud/vertexai';
 
-// SYSTEM_PROMPT directly from User Requirement
-const SYSTEM_PROMPT = [
-    "## ROLE & OBJECTIVE",
-    "You are 'RangeShield Co-Pilot', an elite EV Race Strategist and Intelligent Navigation Assistant.",
-    "Your SOLE purpose is to guide the user safely to their destination by optimizing energy, speed, and charging stops.",
-    "You possess real-time telemetry, physics simulation data, and a live feed of charging stations.",
-    "",
-    "## INPUT CONTEXT (You will receive this JSON data)",
-    "- **Telemetry:** Current Speed, SOC (Battery %), SOH (Health), Tire Pressure, Motor Temp.",
-    "- **Trip:** Distance Remaining, ETA, Current Weather (Wind/Temp).",
-    "- **Physics Engine:** 'Normal Mode' Arrival % vs. 'Eco Mode' Arrival %.",
-    "- **Chargers:** A list of verified Open Charge Map stations ahead.",
-    "",
-    "## CORE DECISION PROTOCOLS",
-    "1. **The '10% Rule' (CRITICAL):**",
-    "   - IF 'Normal Mode' Arrival SOC is < 10%: You MUST strictly advise the user to switch to Eco Mode or plan a charge.",
-    "   - Use clear, urgent language: 'Critical Range Alert. Reduce speed to 85km/h immediately to extend range by 15km.'",
-    "",
-    "2. **Intelligent Charging Strategy:**",
-    "   - DO NOT just list chargers. Recommend the *single best option* based on the user's situation.",
-    "   - *Scenario A (Critical):* Suggest the closest Fast Charger (High kW).",
-    "   - *Scenario B (Comfort):* Suggest a charger near the halfway point with amenities (food/rest).",
-    "",
-    "3. **Tactical Terrain Analysis:**",
-    "   - If the user asks about the road ahead, analyze the 'Elevation Lookahead' data.",
-    "   - Advise on regenerative braking: 'Steep descent ahead. Engage Max Regen to recover ~2% battery.'",
-    "",
-    "## STRICT BEHAVIORAL GUARDRAILS",
-    "1. **Domain Isolation:** You are NOT a general purpose AI. You DO NOT know about politics, history, cooking, or code.",
-    "   - *Trigger:* If asked 'Who won the election?' or 'How do I make pasta?'",
-    "   - *Response:* 'I am tuned exclusively for real-time EV telemetry and trip optimization. Let's focus on your battery levels.'",
-    "2. **Conciseness:** Keep responses under 40 words unless explaining a complex strategy. Drivers cannot read long essays.",
-    "3. **Tone:** Professional, Calm, Authoritative (like an F1 Race Engineer).",
-    "",
-    "## OUTPUT FORMAT",
-    "Provide plain text responses formatted for a Heads-Up Display (short paragraphs, bullet points for lists)."
-].join("\n");
+export const dynamic = 'force-dynamic';
+
+const SYSTEM_INSTRUCTION = `You are RangeShield Co-Pilot, powered by Gemma 4 (gemma-4-26b-a4b-it) — a 26-billion parameter AI model by Google.
+You are in PLANNING MODE, helping the driver optimise their trip before they leave.
+
+Your job: look at the route data, charging stations, and vehicle settings and give one clear, friendly recommendation.
+
+RECOMMENDATION PRIORITY (follow this order strictly):
+1. Route optimisation — is there a shorter, flatter, or more efficient path?
+2. Charging stops — recommend the best station along the route.
+3. Battery / vehicle adjustments — tyre pressure, pre-conditioning, efficiency mode.
+4. Reduce cargo — only if the trip is truly marginal and options 1–3 are exhausted.
+5. Reduce passengers — almost never. Only absolute last resort.
+
+If asked what model/AI you are: say "I'm powered by Gemma 4 (26B parameters) by Google, running via Google AI Studio."
+
+Style: friendly, 2–4 sentences, one clear recommendation. Never mention passengers or cargo unprompted.
+Only discuss EV driving, range, charging, and trip planning.`;
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+async function geocode(query: string): Promise<{ lat: number; lng: number } | null> {
+    try {
+        const res  = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`,
+            { headers: { 'User-Agent': 'RangeShield-CoPilot' } }
+        );
+        const data = await res.json();
+        if (data?.length) return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+    } catch { /* ignore */ }
+    return null;
+}
+
+async function fetchOSRM(origin: string, dest: string) {
+    try {
+        const [o, d] = await Promise.all([geocode(origin), geocode(dest)]);
+        if (!o || !d) return null;
+        const res  = await fetch(
+            `http://router.project-osrm.org/route/v1/driving/${o.lng},${o.lat};${d.lng},${d.lat}?overview=false`
+        );
+        const data = await res.json();
+        if (data.code !== 'Ok') return null;
+        return {
+            distance_km: Math.round(data.routes[0].distance / 1000),
+            duration_min: Math.round(data.routes[0].duration / 60),
+            midLat: (o.lat + d.lat) / 2,
+            midLng: (o.lng + d.lng) / 2,
+        };
+    } catch { return null; }
+}
+
+async function fetchOCM(lat: number, lng: number, radius = 40): Promise<any[]> {
+    const apiKey = process.env.OCM_API_KEY;
+    if (!apiKey) return [];
+    try {
+        const params = new URLSearchParams({
+            output: 'json', latitude: lat.toString(), longitude: lng.toString(),
+            distance: radius.toString(), distanceunit: 'KM',
+            maxresults: '5', compact: 'true', verbose: 'false', key: apiKey,
+        });
+        const res  = await fetch(`https://api.openchargemap.io/v3/poi/?${params}`);
+        const data = await res.json();
+        return Array.isArray(data) ? data : [];
+    } catch { return []; }
+}
+
+// ── Route handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
+    let body: any = {};
     try {
-        const body = await req.json();
+        body = await req.json();
         const { messages, context } = body;
-        // context contains: { telemetry, trip, user, chargers }
 
-        // Construct the full prompt context
-        let fullPrompt = "";
+        const apiKey = process.env.Model_key;
+        if (!apiKey) return NextResponse.json({ error: 'Model_key not set' }, { status: 500 });
 
-        if (context) {
-            fullPrompt += `DATA CONTEXT (Variables to use):
-- Current Range: ${context.telemetry.range_km} km
-- Distance to Go: ${context.trip.distance_km} km
-- Efficiency: ${context.telemetry.efficiency} kWh/km
-- Passenger Count: ${context.user.passengers}
-- Arrival SOC: ${context.telemetry.arrival_soc}%
+        const userMessage: string = messages?.[messages.length - 1]?.content ?? '';
+        const trip = context?.trip ?? {};
+        const t    = context?.telemetry ?? {};
 
-YOUR KNOWLEDGE BASE (Real-time Chargers):
-${JSON.stringify(context.chargers)}
-`;
+        // Fetch OSRM + OCM on first USER message (not counting any initial assistant greeting)
+        let routeInfo: Awaited<ReturnType<typeof fetchOSRM>> = null;
+        let chargers: any[] = context?.chargers ?? [];
+
+        const userMessageCount = (messages ?? []).filter((m: any) => m.role === 'user').length;
+        const isFirstMessage   = userMessageCount === 1;
+        if (isFirstMessage && trip.origin && trip.destination) {
+            const [osrmResult, ocmResult] = await Promise.all([
+                fetchOSRM(trip.origin, trip.destination),
+                (async () => {
+                    // OCM: search near midpoint if we have chargers, else fetch now
+                    if (chargers.length > 0) return chargers;
+                    const o = await geocode(trip.origin);
+                    const d = trip.destination ? await geocode(trip.destination) : null;
+                    if (!o) return [];
+                    const midLat = d ? (o.lat + d.lat) / 2 : o.lat;
+                    const midLng = d ? (o.lng + d.lng) / 2 : o.lng;
+                    return fetchOCM(midLat, midLng);
+                })(),
+            ]);
+            routeInfo = osrmResult;
+            chargers  = ocmResult;
         }
 
-        const userMessage = messages[messages.length - 1].content;
+        // Build rich context note
+        const passengers  = trip.passengers  ?? 1;
+        const cargoKg     = trip.cargo_kg    ?? 0;
+        const avgPaxKg    = 75;
+        const vehicleKg   = 2100;
+        const totalWeight = vehicleKg + passengers * avgPaxKg + cargoKg;
 
-        // --- VERTEX AI SDK INTEGRATION ---
-        console.log("Attempting Vertex AI SDK Call...");
-        let lastError = null;
-        try {
-            // Initialize Vertex AI
-            const vertex_ai = new VertexAI({
-                project: 'rangeai',
-                location: 'us-central1'
+        const lines: (string | null)[] = [
+            '=== PLANNING MODE ===',
+            trip.origin      ? `Route: ${trip.origin} → ${trip.destination ?? 'unknown destination'}` : null,
+            routeInfo        ? `OSRM route distance: ${routeInfo.distance_km} km, ~${routeInfo.duration_min} min driving` : null,
+            trip.battery_pct != null ? `Current battery: ${trip.battery_pct}% of ${trip.battery_kwh ?? '?'} kWh` : null,
+            t.efficiency     != null ? `Efficiency: ${t.efficiency} kWh/km` : null,
+            trip.tire_psi    != null ? `Tyre pressure: ${trip.tire_psi} PSI (optimal: 35 PSI)` : null,
+            `Passengers: ${passengers}`,
+            `Cargo: ${cargoKg} kg`,
+            `Total vehicle weight: ${totalWeight} kg (vehicle ${vehicleKg} kg + ${passengers} pax × ${avgPaxKg} kg + ${cargoKg} kg cargo)`,
+            t.arrival_soc    != null ? `Predicted arrival battery: ${t.arrival_soc}%` : 'Arrival battery: not yet calculated (user has not run range analysis)',
+            chargers.length > 0
+                ? `Charging stations along route: ${chargers.length} (nearest: ${chargers[0]?.AddressInfo?.Title ?? 'unknown'})`
+                : 'No charging stations found on this route yet.',
+        ].filter(Boolean);
+
+        const contextNote = lines.join('\n');
+
+        // Conversation history
+        const history = (messages ?? []).slice(0, -1).map((m: any) => ({
+            role:  m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }],
+        }));
+
+        // Seed as model turn so Gemma treats it as known data
+        if (contextNote) {
+            history.push({
+                role:  'model',
+                parts: [{ text: `I have your trip data loaded:\n${contextNote}\n\nReady to help optimise your journey!` }],
             });
-
-            // Instantiate the model
-            const generativeModel = vertex_ai.getGenerativeModel({
-                model: 'gemini-2.5-pro'
-            });
-
-            const req = {
-                contents: [{
-                    role: 'user',
-                    parts: [{ text: SYSTEM_PROMPT + "\n\n" + fullPrompt + "\n\nUser: " + userMessage }]
-                }]
-            };
-
-            const streamingResp = await generativeModel.generateContent(req);
-            const response = await streamingResp.response;
-
-            if (response.candidates && response.candidates.length > 0 && response.candidates[0].content && response.candidates[0].content.parts) {
-                const reply = response.candidates[0].content.parts[0].text;
-                if (reply) {
-                    return NextResponse.json({ reply });
-                }
-            }
-            throw new Error("No candidates returned from Vertex AI");
-
-        } catch (vertexError: any) {
-            console.error("Vertex AI Error:", vertexError);
-            console.log("Falling back to Rule-Based Co-Pilot.");
-            lastError = vertexError;
-            // Fallthrough to mock logic below
         }
 
-        // --- FALLBACK MOCK (Rule-Based "Smart" Reply) ---
-        console.log("Using Smart Mock AI");
+        history.push({ role: 'user', parts: [{ text: userMessage }] });
 
-        let mockReply = "";
+        const controller = new AbortController();
+        const timeoutId  = setTimeout(() => controller.abort(), 120000);
 
-        if (context) {
-            const soc = context.telemetry.arrival_soc;
-            const range = context.telemetry.range_km;
-            const diet = userMessage.toLowerCase();
-            const chargers = context.chargers || [];
+        const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
+                body: JSON.stringify({
+                    systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+                    contents: history,
+                    generationConfig: { temperature: 0.5, maxOutputTokens: 300 },
+                }),
+            }
+        );
+        clearTimeout(timeoutId);
 
-            // Dynamic Rule Engine
-            if (diet.includes("cargo") || diet.includes("weight") || diet.includes("passenger")) {
-                mockReply = `Payload Analysis: You are currently carrying ${context.user.passengers} pax. Adding more weight will increase rolling resistance and drag. Arrival SOC is currently ${soc}%. Keep it light if possible. [Offline Mode]`;
-            }
-            else if (diet.includes("speed") || diet.includes("fast") || diet.includes("slow")) {
-                mockReply = `Velocity Advisory: Aerodynamic drag increases quadratically with speed. Using "Eco" speeds (under 100km/h) is the most effective way to boost your buffer. Current prediction: ${soc}% Arrival SOC. [Offline Mode]`;
-            }
-            else if (diet.includes("charge") || diet.includes("station") || diet.includes("stop")) {
-                if (chargers.length > 0) {
-                    const best = chargers[0]; // Assuming sorted or just taking first
-                    mockReply = `Charging Strategy: I've identified ${chargers.length} viable stations. The best option is ${best.AddressInfo?.Title || "Station"} (${best.AddressInfo?.Distance?.toFixed(1) || "?"}km away). It fits your route perfectly. [Offline Mode]`;
-                } else {
-                    mockReply = `Charging Update: I am not detecting high-confidence chargers on this immediate vector. However, with ${soc}% arrival charge, you don't strictly *need* a stop, but keep an eye on the gauge. [Offline Mode]`;
-                }
-            }
-            else if (diet.includes("weather") || diet.includes("rain") || diet.includes("temp")) {
-                mockReply = `Environmental Factors: Cabin heating/cooling can consume 1-3kW. If range is tight (${range}km remaining), consider using seat warmers instead of cabin air. [Offline Mode]`;
-            }
-            else if (diet.includes("hello") || diet.includes("hi") || diet.includes("hey")) {
-                mockReply = `Connected. RangeShield Co-Pilot online. Tracking your telemetry. I'm reading ${range}km of range. How can I assist? [Offline Mode]`;
-            }
-            else {
-                // Default Status Report
-                if (soc < 15) {
-                    mockReply = `CRITICAL ALERT: Arrival SOC is ${soc}%. This is below safety margins. Recommendation: REDUCE SPEED and plan a charging stop immediately. [Offline Mode]`;
-                } else {
-                    mockReply = `Status Nominal. Arrival SOC predicted at ${soc}%. You have a ${range}km buffer. You are clear to proceed so long as conditions remain stable. [Offline Mode]`;
-                }
-            }
+        if (!res.ok) {
+            const errText = await res.text();
+            throw new Error(`AI Studio ${res.status}: ${errText.slice(0, 200)}`);
+        }
+
+        const data = await res.json();
+        const parts: any[] = data.candidates?.[0]?.content?.parts ?? [];
+        const reply = parts
+            .filter((p: any) => !p.thought)
+            .map((p: any) => p.text ?? '')
+            .join('')
+            .trim();
+        if (!reply) throw new Error('Empty response');
+
+        return NextResponse.json({ reply, chargerCount: chargers.length, routeInfo });
+
+    } catch (err) {
+        console.warn('[CoPilot] Gemma failed:', err instanceof Error ? err.message : err);
+
+        const context = body?.context;
+        const msg     = (body?.messages?.[body.messages.length - 1]?.content ?? '').toLowerCase();
+        const trip    = context?.trip    ?? {};
+        const t       = context?.telemetry ?? {};
+        const soc     = t.arrival_soc ?? null;
+        const nChg    = context?.chargers?.length ?? 0;
+
+        let reply = '';
+        if (!trip.origin) {
+            reply = "Enter your origin and destination above, then I can give you a personalised range and route analysis!";
+        } else if (soc !== null && soc < 10) {
+            reply = `Heads up — with your current settings I'm predicting only ${soc}% battery on arrival. Try charging before you leave or look for a fast charger about halfway through.`;
+        } else if (msg.includes('charge') || msg.includes('station')) {
+            reply = nChg > 0
+                ? `There are ${nChg} charging stations along your route. Even with a comfortable buffer, a quick top-up halfway is always good practice.`
+                : `I haven't found charging stations on this route yet. Make sure your battery is as full as possible before you leave.`;
+        } else if (msg.includes('route') || msg.includes('faster') || msg.includes('shorter')) {
+            reply = `I'll check the OSRM routing for the most efficient path. A flatter route can save 10–15% energy compared to a hilly one — worth the extra few minutes.`;
         } else {
-            mockReply = "System initializing... Telemetry link established. Ready for input. [Offline Mode]";
+            reply = soc !== null
+                ? `Planning looks ${soc >= 20 ? 'solid' : 'a bit tight'} — ${soc}% predicted on arrival. ${soc >= 20 ? 'Your route and battery settings are in good shape.' : 'Consider inflating tyres to 35 PSI and pre-cooling the cabin to recover a few extra kilometres.'}`
+                : `Enter your route details and I'll analyse the best way to reach your destination efficiently!`;
         }
 
-        if (lastError) {
-            mockReply += ` (Error: ${lastError.message || JSON.stringify(lastError)})`;
-        }
-
-        return NextResponse.json({ reply: mockReply });
-
-    } catch (error) {
-        console.error("Co-Pilot Error:", error);
-        return NextResponse.json({ error: "Comms Link Failure" }, { status: 500 });
+        return NextResponse.json({ reply });
     }
 }

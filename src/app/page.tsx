@@ -6,7 +6,7 @@ export default function Home() {
       <div className={styles.content}>
         <h1 className={styles.title}>RangeShield AI</h1>
         <p className={styles.description}>
-          Real-time EV co-pilot utilizing Confluent and Vertex AI to predict precise range and optimize energy
+          Optimising energy consumption and AI-driven guidance tailored to your route, your vehicle, and your driving style.
         </p>
       </div>
       <div className={styles.visual}></div>

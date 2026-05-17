@@ -1,47 +1,66 @@
 import { NextResponse } from 'next/server';
-import { startTelemetrySimulation, startMovementSimulation } from '@/lib/kafkaSimulator';
-import { runSimulation } from '@/lib/simulator';
+import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(request: Request) {
-    const { searchParams } = new URL(request.url);
-    const mode = searchParams.get('mode');
+// Module-level process handle — persists for the lifetime of the Next.js server
+let simProcess: ChildProcess | null = null;
 
-    // /plan uses snapshot mode -> sends to vehicle_telemetry once
-    if (mode === 'snapshot') {
-        try {
-            const result = await runSimulation();
-            return NextResponse.json({ success: true, data: result });
-        } catch (error: any) {
-            return NextResponse.json({ success: false, error: error.message }, { status: 500 });
-        }
-    }
-
-    // /trip uses dynamic mode -> continuous stream to vehicle_health_stream
-    try {
-        startTelemetrySimulation();
-        return NextResponse.json({ success: true, message: "Dynamic stream started" });
-    } catch (error: any) {
-        return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+function killExisting() {
+    if (simProcess && !simProcess.killed) {
+        simProcess.kill('SIGTERM');
+        simProcess = null;
     }
 }
 
 export async function POST(req: Request) {
-    console.log("🚀 [API] Starting Movement Simulation...");
+    const body = await req.json().catch(() => ({}));
+    const {
+        origin      = 'Bangalore, India',
+        destination = 'Chennai, India',
+        soc         = 85,
+        speed       = 80,
+    } = body;
+
+    killExisting();
+
+    // Warm up /api/vehicle/analyze so Next.js compiles it before the sim needs it.
+    // Without this, the first callGemma() hits the route mid-compile and gets HTML.
     try {
-        const body = await req.json();
-        const { encodedPolyline } = body;
+        await fetch('http://localhost:3000/api/vehicle/analyze', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ anomalyType: 'warmup', telemetry: {} }),
+        });
+    } catch { /* ignore — warmup best-effort */ }
 
-        if (!encodedPolyline) {
-            return NextResponse.json({ success: false, error: "Missing encodedPolyline" }, { status: 400 });
-        }
+    const scriptPath = path.join(process.cwd(), 'scripts', 'simulate.mjs');
 
-        startMovementSimulation(encodedPolyline); // Fire and forget
-        return NextResponse.json({ success: true, message: "Movement Simulation Started along route" });
+    simProcess = spawn('node', [scriptPath], {
+        env: {
+            ...process.env,
+            NEXT_URL:   'http://localhost:3000',
+            SIM_ORIGIN: String(origin),
+            SIM_DEST:   String(destination),
+            SIM_SOC:    String(soc),
+            SIM_SPEED:  String(speed),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
-    } catch (error: any) {
-        console.error("💥 [API] Movement Start Failed:", error);
-        return NextResponse.json({ success: false, error: error.message }, { status: 500 });
-    }
+    simProcess.stdout?.on('data', (d: Buffer) => process.stdout.write(`[sim] ${d}`));
+    simProcess.stderr?.on('data', (d: Buffer) => process.stderr.write(`[sim:err] ${d}`));
+    simProcess.on('exit', (code: number | null) => {
+        console.log(`[sim] process exited — code ${code}`);
+        simProcess = null;
+    });
+
+    console.log(`[sim] started PID ${simProcess.pid} | ${origin} → ${destination} | SOC ${soc}%`);
+    return NextResponse.json({ started: true, pid: simProcess.pid });
+}
+
+export async function DELETE() {
+    killExisting();
+    return NextResponse.json({ stopped: true });
 }

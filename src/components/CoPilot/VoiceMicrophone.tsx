@@ -1,11 +1,50 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Mic, MicOff, Loader2 } from 'lucide-react';
 
+// Action keywords that require confirmation before acting
+const ACTION_KEYWORDS = ['reroute', 're-route', 'charging station', 'find charger', 'navigate to', 'take me to', 'stop at'];
+
+function detectAction(text: string): string | null {
+    const lower = text.toLowerCase();
+    if (lower.includes('reroute') || lower.includes('re-route')) return 'reroute';
+    if (lower.includes('charging station') || lower.includes('find charger') || lower.includes('charger')) return 'charger';
+    if (lower.includes('navigate to') || lower.includes('take me to') || lower.includes('stop at')) return 'navigate';
+    return null;
+}
+
+function speak(text: string) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    const doSpeak = () => {
+        window.speechSynthesis.cancel();
+        // Chrome pauses speechSynthesis when tab backgrounds — resume first
+        if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+
+        const utterance  = new SpeechSynthesisUtterance(text);
+        utterance.rate   = 0.92;
+        utterance.pitch  = 1.0;
+        utterance.volume = 1.0;
+
+        // Pick best English voice
+        const voices    = window.speechSynthesis.getVoices();
+        const preferred = voices.find(v => v.lang === 'en-US' && v.localService)
+            ?? voices.find(v => v.lang.startsWith('en'));
+        if (preferred) utterance.voice = preferred;
+
+        utterance.onerror = (e) => console.warn('[TTS] error:', e.error);
+        window.speechSynthesis.speak(utterance);
+    };
+
+    // Defer by one tick — Chrome blocks speak() called inside Promise chains
+    setTimeout(doSpeak, 50);
+}
+
 interface VoiceMicrophoneProps {
     onResponse: (response: string, isImportant: boolean) => void;
+    onTranscript?: (text: string) => void;
     context?: {
         telemetry: {
             soc: number;
@@ -14,17 +53,24 @@ interface VoiceMicrophoneProps {
             tirePressure: number;
         };
         trip?: {
-            distance_km: number;
-            duration_mins: number;
+            origin?: string;
+            destination?: string;
+            distance_km?: number;
+            duration_mins?: number;
+            battery_pct?: number;
+            cargo_kg?: number;
+            passengers?: number;
         };
     };
 }
 
-export default function VoiceMicrophone({ onResponse, context }: VoiceMicrophoneProps) {
-    const [isListening, setIsListening] = useState(false);
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [transcript, setTranscript] = useState('');
-    const [recognition, setRecognition] = useState<SpeechRecognition | null>(null);
+export default function VoiceMicrophone({ onResponse, onTranscript, context }: VoiceMicrophoneProps) {
+    const [isListening, setIsListening]         = useState(false);
+    const [isProcessing, setIsProcessing]       = useState(false);
+    const [transcript, setTranscript]           = useState('');
+    const [recognition, setRecognition]         = useState<SpeechRecognition | null>(null);
+    const [pendingAction, setPendingAction]     = useState<{ type: string; question: string } | null>(null);
+    const ttsUnlockedRef                        = useRef(false);
 
     // Initialize Speech Recognition
     useEffect(() => {
@@ -63,21 +109,61 @@ export default function VoiceMicrophone({ onResponse, context }: VoiceMicrophone
 
     const handleVoiceInput = useCallback(async (voiceText: string) => {
         if (!voiceText.trim()) return;
+        const lower = voiceText.toLowerCase().trim();
+
+        // ── Confirmation reply handling ──────────────────────────────────────
+        if (pendingAction) {
+            const confirmed = lower.includes('yes') || lower.includes('yeah') || lower.includes('okay') || lower.includes('ok') || lower.includes('sure') || lower.includes('go ahead');
+            const denied    = lower.includes('no') || lower.includes('nope') || lower.includes('cancel') || lower.includes('stop');
+
+            if (confirmed) {
+                const msg = pendingAction.type === 'charger'
+                    ? "Looking for the nearest charging station along your route. I'll update you shortly."
+                    : pendingAction.type === 'reroute'
+                    ? "Recalculating the most efficient route for your current battery level."
+                    : "Got it, navigating now.";
+                setPendingAction(null);
+                speak(msg);
+                onResponse(msg, false);
+            } else if (denied) {
+                const msg = "No problem, staying on the current route.";
+                setPendingAction(null);
+                speak(msg);
+                onResponse(msg, false);
+            } else {
+                speak("Sorry, I didn't catch that. Say yes to confirm or no to cancel.");
+            }
+            return;
+        }
 
         setIsProcessing(true);
         setTranscript('');
+        onTranscript?.(voiceText);
 
         try {
-            // Build context for copilot
             const apiContext = context ? {
                 telemetry: {
-                    range_km: Math.round((context.telemetry.soc / 100) * 400), // Approximate range
+                    soc:         context.telemetry.soc,
                     arrival_soc: context.telemetry.soc,
-                    efficiency: context.telemetry.efficiency / 1000
+                    efficiency:  context.telemetry.efficiency > 2
+                        ? context.telemetry.efficiency / 1000   // Wh/km → kWh/km
+                        : context.telemetry.efficiency,
+                    temp:        context.telemetry.temp,
+                    range_km:    null,                           // live trip — unknown ahead
                 },
-                trip: context.trip || { distance_km: 0, duration_mins: 0 },
-                user: { passengers: 1, payload: 0 },
-                chargers: []
+                trip: {
+                    origin:       context.trip?.origin       ?? '',
+                    destination:  context.trip?.destination  ?? '',
+                    distance_km:  context.trip?.distance_km  ?? 0,
+                    duration_mins: context.trip?.duration_mins ?? 0,
+                    battery_pct:  context.trip?.battery_pct  ?? context.telemetry.soc,
+                    battery_kwh:  null,
+                    tire_psi:     context.telemetry.tirePressure,
+                    cargo_kg:     context.trip?.cargo_kg     ?? 0,
+                    passengers:   context.trip?.passengers   ?? 1,
+                },
+                user:     { passengers: context.trip?.passengers ?? 1, payload: context.trip?.cargo_kg ?? 0 },
+                chargers: [],
             } : null;
 
             const res = await fetch('/api/copilot', {
@@ -91,11 +177,26 @@ export default function VoiceMicrophone({ onResponse, context }: VoiceMicrophone
 
             const data = await res.json();
             if (data.reply) {
-                // Check if response indicates critical/important info
                 const isImportant = data.reply.toLowerCase().includes('critical') ||
                     data.reply.toLowerCase().includes('alert') ||
                     data.reply.toLowerCase().includes('warning');
-                onResponse(data.reply, isImportant);
+
+                // Detect if response implies an action — ask for confirmation first
+                const actionType = detectAction(voiceText) || detectAction(data.reply);
+                if (actionType) {
+                    const questions: Record<string, string> = {
+                        charger:  "Should I find the nearest charging station along your route? Say yes or no.",
+                        reroute:  "Should I reroute to a more efficient path for your current battery level? Say yes or no.",
+                        navigate: "Should I navigate to that location? Say yes or no.",
+                    };
+                    const question = questions[actionType] ?? "Should I go ahead with that? Say yes or no.";
+                    setPendingAction({ type: actionType, question });
+                    speak(data.reply + ' ' + question);
+                    onResponse(data.reply + '\n\n' + question, isImportant);
+                } else {
+                    speak(data.reply);
+                    onResponse(data.reply, isImportant);
+                }
             } else {
                 onResponse('Unable to process request. Please try again.', false);
             }
@@ -111,6 +212,20 @@ export default function VoiceMicrophone({ onResponse, context }: VoiceMicrophone
         if (!recognition) {
             alert('Speech recognition is not supported in this browser.');
             return;
+        }
+
+        // Unlock TTS on every tap (Chrome resets after tab switch / idle)
+        if ('speechSynthesis' in window) {
+            if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+            if (!ttsUnlockedRef.current) {
+                ttsUnlockedRef.current = true;
+                // Silent utterance to unlock audio context in user-gesture handler
+                const unlock = new SpeechSynthesisUtterance('​');
+                unlock.volume = 0;
+                window.speechSynthesis.speak(unlock);
+            }
+            // Pre-load voices list
+            window.speechSynthesis.getVoices();
         }
 
         if (isListening) {
@@ -143,8 +258,15 @@ export default function VoiceMicrophone({ onResponse, context }: VoiceMicrophone
 
     return (
         <div className="flex flex-col items-center gap-4">
+            {/* Pending action confirmation prompt */}
+            {pendingAction && (
+                <div className="text-xs text-cyan-300 text-center max-w-[240px] bg-cyan-950/40 border border-cyan-700/50 rounded-lg px-3 py-2 animate-pulse">
+                    {pendingAction.question}
+                </div>
+            )}
+
             {/* Transcript Display */}
-            {transcript && (
+            {transcript && !pendingAction && (
                 <div className="text-xs text-zinc-400 italic text-center max-w-[200px] truncate">
                     "{transcript}"
                 </div>

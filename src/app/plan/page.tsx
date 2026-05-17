@@ -1,12 +1,11 @@
 "use client";
 
 import React, { useState } from 'react';
-import { MapPin, Users, Box, Play, Calculator, ArrowRight, Activity, Wifi } from 'lucide-react';
+import { MapPin, Users, Box, Play, Calculator, ArrowRight, Activity, Wifi, MessageCircle } from 'lucide-react';
 import dynamic from 'next/dynamic';
 
 import { searchCity, GeocodeResult } from '@/lib/geocoding';
 import { fetchWeather, WeatherData } from '@/lib/weather';
-import CoPilotCard from '@/components/CoPilot/CoPilotCard';
 import ChatInterface from '@/components/CoPilot/ChatInterface';
 
 // Dynamic import for Google Map to avoid SSR issues
@@ -32,10 +31,12 @@ export default function PlanPage() {
     const [rangeCalculated, setRangeCalculated] = useState(false);
 
     // Geocoding State
-    const [startLocation, setStartLocation] = useState<GeocodeResult | null>(null);
+    const [startText, setStartText]           = useState('Bangalore, India');
+    const [destText, setDestText]             = useState('');
+    const [startLocation, setStartLocation]   = useState<GeocodeResult | null>(null);
     const [destinationLocation, setDestinationLocation] = useState<GeocodeResult | null>(null);
     const [isSearchingStart, setIsSearchingStart] = useState(false);
-    const [isSearchingDest, setIsSearchingDest] = useState(false);
+    const [isSearchingDest, setIsSearchingDest]   = useState(false);
 
     // Weather State (Still used for initial display if needed, but API returns precise weather)
     // We can merge them or update weather state from API response
@@ -44,44 +45,34 @@ export default function PlanPage() {
     const [calculationResult, setCalculationResult] = useState<any>(null); // Store API response
     const [error, setError] = useState<string | null>(null);
 
-    // Stream State
+    // Vehicle State
     const [vehicleTemp, setVehicleTemp] = useState<number | null>(null);
     const [tirePressure, setTirePressure] = useState<number>(35); // Default 35 PSI
     const [soh, setSoh] = useState<number | null>(null);
-    const [isStreamConnected, setIsStreamConnected] = useState(false);
 
     // Co-Pilot State
     const [coPilotSuggestion, setCoPilotSuggestion] = useState<string | null>(null);
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [coPilotContext, setCoPilotContext] = useState<any>(null);
 
-    // Telemetry Integration (Static Snapshot)
+    // On plan page load: read current vehicle state to seed form fields
     React.useEffect(() => {
-        const fetchTelemetrySnapshot = async () => {
+        const initVehicle = async () => {
             try {
-                // Fetch static snapshot strictly for planning
-                console.log("📸 Fetching static telemetry snapshot...");
-                const res = await fetch('/api/simulate?mode=snapshot');
+                const res  = await fetch('/api/vehicle', { method: 'POST' });
                 const json = await res.json();
-
-                if (json.success && json.data && json.data.payload) {
-                    const data = json.data.payload;
-                    console.log("✅ Static Snapshot loaded:", data);
-
-                    // Update state with static values
-                    if (data.vehicle_temp !== undefined) setVehicleTemp(Number(data.vehicle_temp));
-                    if (data.soc !== undefined) setBattery(Number(data.soc));
-                    if (data.tire_pressure !== undefined) setTirePressure(Number(data.tire_pressure));
-                    if (data.soh !== undefined) setSoh(Number(data.soh));
-
-                    setIsStreamConnected(true); // Connected to "Static Data Source"
+                if (json.state) {
+                    const s = json.state;
+                    if (s.soc !== undefined && s.soc > 0)          setBattery(Math.round(s.soc));
+                    if (s.temp !== undefined)                       setVehicleTemp(s.temp);
+                    if (s.tirePressure !== undefined && s.tirePressure > 0) setTirePressure(s.tirePressure);
+                    if (s.soh !== undefined && s.soh > 0)          setSoh(s.soh);
                 }
-            } catch (error) {
-                console.error("Failed to fetch telemetry snapshot:", error);
+            } catch (err) {
+                console.error('Vehicle init failed:', err);
             }
         };
-
-        fetchTelemetrySnapshot();
+        initVehicle();
     }, []);
 
     const handleCitySearch = async (query: string, type: 'start' | 'destination') => {
@@ -103,8 +94,9 @@ export default function PlanPage() {
         setLoadingWeather(true);
         setRangeCalculated(false);
 
-        const startAddr = startLocation?.display_name || "San Francisco, CA";
-        const destAddr = destinationLocation?.display_name || "Los Angeles, CA"; // Warning: Fallback if empty, better to require input
+        if (!destText.trim()) { setError('Please enter a destination before calculating.'); setLoadingWeather(false); return; }
+        const startAddr = startText.trim() || 'Bangalore, India';
+        const destAddr  = destText.trim();
 
         // Prepare Payload
         // Note: energyConsumption in page is kWh/km (0.2). API expects kWh/100km if > 2, or handles it. 
@@ -205,7 +197,7 @@ export default function PlanPage() {
                             Trip Configuration
                         </h1>
                         <p className="text-xs text-zinc-500 font-mono tracking-wider">
-                            INITIALIZE CONFLUENT STREAMING PIPELINE & VERTEX AI ANALYSIS
+                            EV RANGE & ROUTE ANALYSIS
                         </p>
                     </div>
 
@@ -224,7 +216,8 @@ export default function PlanPage() {
                                 <div className="relative">
                                     <input
                                         id="start"
-                                        defaultValue="Current Location (San Francisco)"
+                                        value={startText}
+                                        onChange={(e) => setStartText(e.target.value)}
                                         onBlur={(e) => handleCitySearch(e.target.value, 'start')}
                                         onKeyDown={(e) => e.key === 'Enter' && handleCitySearch(e.currentTarget.value, 'start')}
                                         className="flex h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent pr-10 transition-all"
@@ -243,6 +236,8 @@ export default function PlanPage() {
                                 <div className="relative">
                                     <input
                                         id="destination"
+                                        value={destText}
+                                        onChange={(e) => setDestText(e.target.value)}
                                         placeholder="Enter coordinates or address"
                                         onBlur={(e) => handleCitySearch(e.target.value, 'destination')}
                                         onKeyDown={(e) => e.key === 'Enter' && handleCitySearch(e.currentTarget.value, 'destination')}
@@ -455,7 +450,7 @@ export default function PlanPage() {
                     <button
                         className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border bg-background w-full border-blue-500/50 text-blue-400 hover:bg-blue-950/30 hover:text-blue-300 font-mono uppercase tracking-widest h-12"
                         onClick={handleCalculate}
-                        disabled={loadingWeather}
+                        disabled={loadingWeather || !destText.trim()}
                     >
                         {loadingWeather ? (
                             <div className="animate-spin h-4 w-4 border-2 border-blue-400 border-t-transparent rounded-full mr-2" />
@@ -479,11 +474,13 @@ export default function PlanPage() {
                                     },
                                     start: startLocation ? { lat: parseFloat(startLocation.lat), lon: parseFloat(startLocation.lon) } : undefined,
                                     end: destinationLocation ? { lat: parseFloat(destinationLocation.lat), lon: parseFloat(destinationLocation.lon) } : undefined,
-                                    passengers: passengers, // Persist context
-                                    cargo: cargo
+                                    originText:  startText,
+                                    destText:    destText,
+                                    passengers,
+                                    cargo
                                 };
                                 localStorage.setItem('rangeShield_activeTrip', JSON.stringify(tripPayload));
-                                window.location.href = '/trip'; // Force full nav to ensure clean state
+                                window.location.href = '/trip';
                             }
                         }}
                         className={`inline-flex items-center justify-center rounded-md text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 w-full h-14 font-bold tracking-widest transition-all ${rangeCalculated
@@ -495,13 +492,14 @@ export default function PlanPage() {
                         START NAVIGATION
                     </button>
 
-                    {/* Co-Pilot Suggestion Card */}
-                    {coPilotSuggestion && (
-                        <CoPilotCard
-                            suggestion={coPilotSuggestion}
-                            onClick={() => setIsChatOpen(true)}
-                        />
-                    )}
+                    {/* Gemma chat button */}
+                    <button
+                        onClick={() => setIsChatOpen(true)}
+                        className="w-full flex items-center justify-center gap-2 border border-violet-700/50 bg-violet-950/20 hover:bg-violet-950/40 text-violet-400 text-sm font-mono uppercase tracking-widest py-2.5 rounded-lg transition-all"
+                    >
+                        <MessageCircle className="w-4 h-4" />
+                        Ask Co-Pilot · Gemma 4
+                    </button>
 
 
                 </div>
@@ -550,15 +548,6 @@ export default function PlanPage() {
                 )}
 
                 <div className="flex items-center justify-between py-2 border-t border-zinc-900/50">
-                    <span className={`inline-flex items-center rounded-full border text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-emerald-900/50 ${isStreamConnected ? 'text-emerald-500 bg-emerald-950/10' : 'text-zinc-500 bg-zinc-900'} gap-2 px-3 py-1`}>
-                        <span className="relative flex h-2 w-2">
-                            {isStreamConnected && (
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                            )}
-                            <span className={`relative inline-flex rounded-full h-2 w-2 ${isStreamConnected ? 'bg-emerald-500' : 'bg-zinc-600'}`}></span>
-                        </span>
-                        Confluent Stream: {isStreamConnected ? 'ONLINE' : 'CONNECTING...'}
-                    </span>
                     <span className="inline-flex items-center rounded-full border text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-blue-900/50 text-blue-500 bg-blue-950/10 gap-2 px-3 py-1">
                         <Activity className="w-3 h-3 mr-1" />
                         Vertex AI: CONNECTED
@@ -567,7 +556,7 @@ export default function PlanPage() {
             </aside>
 
             {/* Right Panel - Google Map Visualization */}
-            <main className="flex-1 relative bg-zinc-950 p-4 pl-0">
+            <main className="flex-1 relative bg-zinc-950 p-6">
                 <div className="w-full h-full rounded-xl overflow-hidden border border-zinc-800 relative shadow-2xl">
                     <GoogleMap
                         encodedPolyline={calculationResult?.polyline}
@@ -614,7 +603,44 @@ export default function PlanPage() {
             <ChatInterface
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
-                initialContext={coPilotContext}
+                context={{
+                    telemetry: {
+                        range_km:    calculationResult?.range_analysis?.remaining_range ?? null,
+                        arrival_soc: calculationResult?.range_analysis?.arrival_soc_predicted ?? null,
+                        efficiency:  energyConsumption,
+                        soc:         battery,
+                    },
+                    trip: {
+                        origin:      startText,
+                        destination: destText,
+                        passengers,
+                        cargo_kg:    cargo,
+                        battery_pct: battery,
+                        battery_kwh: batteryCapacity,
+                        tire_psi:    tirePressure,
+                    },
+                    user:     { passengers, payload: cargo },
+                    chargers: calculationResult?.charging_stations ?? [],
+                }}
+                initialContext={coPilotContext ?? {
+                    telemetry: {
+                        range_km:    null,
+                        arrival_soc: null,
+                        efficiency:  energyConsumption,
+                        soc:         battery,
+                    },
+                    trip: {
+                        origin:      startText,
+                        destination: destText,
+                        passengers,
+                        cargo_kg:    cargo,
+                        battery_pct: battery,
+                        battery_kwh: batteryCapacity,
+                        tire_psi:    tirePressure,
+                    },
+                    user: { passengers, payload: cargo },
+                    chargers: [],
+                }}
                 initialSuggestion={coPilotSuggestion || undefined}
             />
         </div>

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "simulate": "node scripts/simulate.mjs"
   },
   "dependencies": {
     "@google-cloud/vertexai": "^1.10.0",
@@ -42,6 +43,7 @@
     "@turf/helpers": "^7.3.1",
     "@turf/turf": "^7.3.1",
     "@types/leaflet": "^1.9.21",
+    "baseline-browser-mapping": "^2.10.30",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -50,7 +52,6 @@
     "embla-carousel-react": "^8.6.0",
     "framer-motion": "^12.23.26",
     "input-otp": "^1.4.2",
-    "kafkajs": "^2.2.4",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.559.0",
     "next": "16.0.8",

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { GoogleMap, useJsApiLoader, Polyline, Marker } from '@react-google-maps/api';
 
 interface Station {
@@ -10,6 +10,13 @@ interface Station {
     };
 }
 
+interface RerouteSegment {
+    points: Array<{ lat: number; lng: number }>;
+    color: string;
+    dashed?: boolean;
+    weight?: number;
+}
+
 interface GoogleMapProps {
     encodedPolyline?: string;
     startPos?: { lat: number; lon: number };
@@ -18,6 +25,8 @@ interface GoogleMapProps {
     tilt?: number;
     heading?: number;
     vehiclePosition?: { lat: number; lng: number; heading: number };
+    rerouteSegments?: RerouteSegment[];
+    rerouteChargerPos?: { lat: number; lng: number; name: string };
 }
 
 const containerStyle = {
@@ -138,33 +147,35 @@ const createNavigationArrowIcon = (heading: number): google.maps.Symbol => ({
 
 const libraries: ("geometry" | "drawing" | "places" | "visualization")[] = ['geometry'];
 
-function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStations = [], tilt = 0, heading = 0, vehiclePosition }: GoogleMapProps) {
+function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStations = [], tilt = 0, heading = 0, vehiclePosition, rerouteSegments = [], rerouteChargerPos }: GoogleMapProps) {
     const { isLoaded } = useJsApiLoader({
         id: 'google-map-script',
         googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
         libraries
     });
 
-    const [map, setMap] = useState<google.maps.Map | null>(null);
+    const [map, setMap]  = useState<google.maps.Map | null>(null);
+    const lastPanRef     = useRef<{ lat: number; lng: number } | null>(null);
 
-    // Apply tilt once when navigation starts (prevent shaking)
-    React.useEffect(() => {
-        if (map && tilt > 0) {
-            // Set tilt and zoom once for navigation mode
-            map.setTilt(45);
-            map.setZoom(17);
-        } else if (map && tilt === 0) {
-            map.setTilt(0);
-        }
-    }, [map, tilt]);
+    const hasVehicle = !!vehiclePosition;
 
-    // Smooth camera follow for vehicle position (no heading rotation to prevent shaking)
+    const vehicleIcon = useMemo(() => {
+        if (!hasVehicle || !isLoaded) return undefined;
+        return createNavigationArrowIcon(vehiclePosition!.heading);
+    }, [vehiclePosition?.heading, hasVehicle, isLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Throttled camera follow: only recenter when vehicle moves >100 m (~0.0009°)
     React.useEffect(() => {
-        if (map && vehiclePosition) {
-            // Only pan to vehicle position - arrow marker shows direction
-            map.panTo({ lat: vehiclePosition.lat, lng: vehiclePosition.lng });
-            // Note: Heading rotation removed to prevent map shaking
+        if (!map || !vehiclePosition) return;
+        const { lat, lng } = vehiclePosition;
+        const last = lastPanRef.current;
+        if (last) {
+            const dLat = lat - last.lat;
+            const dLng = lng - last.lng;
+            if (Math.abs(dLat) < 0.0009 && Math.abs(dLng) < 0.0009) return;
         }
+        lastPanRef.current = { lat, lng };
+        map.setCenter({ lat, lng });
     }, [map, vehiclePosition]);
 
     const onLoad = useCallback(function callback(map: google.maps.Map) {
@@ -181,15 +192,24 @@ function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStation
         return google.maps.geometry.encoding.decodePath(encodedPolyline);
     }, [encodedPolyline]);
 
-    // Fit bounds when path changes
+    // Fit bounds: route > both preview pins > single pin
     React.useEffect(() => {
-        if (map && path.length > 0) {
+        if (!map) return;
+        if (path.length > 0) {
             const bounds = new google.maps.LatLngBounds();
             path.forEach(p => bounds.extend(p));
             if (startPos) bounds.extend({ lat: startPos.lat, lng: startPos.lon });
-            if (endPos) bounds.extend({ lat: endPos.lat, lng: endPos.lon });
+            if (endPos)   bounds.extend({ lat: endPos.lat,   lng: endPos.lon   });
             map.fitBounds(bounds);
-        } else if (map && startPos) {
+        } else if (startPos && endPos) {
+            const bounds = new google.maps.LatLngBounds();
+            bounds.extend({ lat: startPos.lat, lng: startPos.lon });
+            bounds.extend({ lat: endPos.lat,   lng: endPos.lon   });
+            map.fitBounds(bounds, { top: 60, bottom: 60, left: 60, right: 60 });
+        } else if (endPos) {
+            map.panTo({ lat: endPos.lat, lng: endPos.lon });
+            map.setZoom(11);
+        } else if (startPos) {
             map.panTo({ lat: startPos.lat, lng: startPos.lon });
             map.setZoom(12);
         }
@@ -212,15 +232,55 @@ function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStation
             onUnmount={onUnmount}
             options={baseMapOptions}
         >
-            {/* Route Polyline */}
-            {path.length > 0 && (
+            {/* Route Polyline — hidden when reroute is active */}
+            {path.length > 0 && rerouteSegments.length === 0 && (
                 <Polyline
                     path={path}
                     options={{
-                        strokeColor: "#3b82f6", // Blue-500
+                        strokeColor: "#3b82f6",
                         strokeOpacity: 1,
                         strokeWeight: 5,
                     }}
+                />
+            )}
+
+            {/* Reroute segments: solid dark-blue to charger + dotted blue to dest */}
+            {rerouteSegments.map((seg, i) => (
+                <Polyline
+                    key={`reroute-${i}`}
+                    path={seg.points}
+                    options={{
+                        strokeColor: seg.color,
+                        strokeOpacity: seg.dashed ? 0 : 1,
+                        strokeWeight: seg.weight ?? 5,
+                        icons: seg.dashed ? [{
+                            icon: {
+                                path: 'M 0,-1 0,1',
+                                strokeOpacity: 1,
+                                scale: 4,
+                                strokeColor: seg.color,
+                            },
+                            offset: '0',
+                            repeat: '18px',
+                        }] : undefined,
+                    }}
+                />
+            ))}
+
+            {/* Reroute charger waypoint marker */}
+            {rerouteChargerPos && (
+                <Marker
+                    position={{ lat: rerouteChargerPos.lat, lng: rerouteChargerPos.lng }}
+                    icon={{
+                        path: google.maps.SymbolPath.CIRCLE,
+                        fillColor: '#1e3a8a',
+                        fillOpacity: 1,
+                        strokeColor: '#93c5fd',
+                        strokeWeight: 2,
+                        scale: 10,
+                    } as any}
+                    title={rerouteChargerPos.name}
+                    zIndex={900}
                 />
             )}
 
@@ -243,10 +303,10 @@ function GoogleMapComponent({ encodedPolyline, startPos, endPos, chargingStation
             )}
 
             {/* Vehicle Navigation Pointer */}
-            {vehiclePosition && (
+            {vehiclePosition && vehicleIcon && (
                 <Marker
                     position={{ lat: vehiclePosition.lat, lng: vehiclePosition.lng }}
-                    icon={createNavigationArrowIcon(vehiclePosition.heading)}
+                    icon={vehicleIcon as any}
                     title="Your Vehicle"
                     zIndex={1000}
                 />
